@@ -7,17 +7,20 @@ from scipy.ndimage import uniform_filter
 import matplotlib.pyplot as plt
 import numpy as np
 
-IMG_W = 20
-IMG_H = 20
+IMG_W = 40
+IMG_H = 30
+TOF_FRAMES = 64
+TOF_HIST_VALID_BINS = 62
+TOF_BIN_STEP_M = 0.6
 
 # 平面到相机原点的固定距离（米）。
 PLANE_DISTANCE_M = 1.4
 
 # 固定配置：直接运行脚本即可，不需要命令行参数
-DATA_FILE = "data.npy"
+DATA_FILE = "tof.raw"
 
 # ===== 待优化参数初值（宏定义）=====
-F_INIT = 27.5
+F_INIT = 47
 AX_INIT_DEG = 0.0
 AY_INIT_DEG = 0.0
 
@@ -37,7 +40,7 @@ POWELL_DISP = False
 
 
 def _build_roi_uv() -> tuple[np.ndarray, np.ndarray]:
-    # 生成20x20像素网格坐标并展平。
+    # 生成IMG_HxIMG_W像素网格坐标并展平。
     xs = np.arange(0, IMG_W, dtype=np.float64)
     ys = np.arange(0, IMG_H, dtype=np.float64)
     u, v = np.meshgrid(xs, ys)
@@ -109,13 +112,44 @@ def _rms(x: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(x))))
 
 
-def _load_depth_map(path: str) -> np.ndarray:
-    # 读取并检查20x20深度矩阵。
-    arr = np.load(path)
-    arr = np.asarray(arr, dtype=np.float64)
-    if arr.shape != (IMG_H, IMG_W):
-        raise ValueError(f"expect depth map shape {(IMG_H, IMG_W)}, got {arr.shape}")
-    return arr
+def _load_tof_raw_cube(path: str) -> np.ndarray:
+    # 按uint16读取tof.raw，取最后IMG_H*IMG_W*TOF_FRAMES个值并reshape。
+    need = IMG_H * IMG_W * TOF_FRAMES
+    raw = np.fromfile(path, dtype=np.uint16)
+    if raw.size < need:
+        raise ValueError(f"raw data not enough: need {need}, got {raw.size}")
+    cube = raw[-need:].reshape(IMG_H, IMG_W, TOF_FRAMES).astype(np.float32, copy=False)
+    return cube
+
+
+def _depth_from_hist_centroid(tof_cube: np.ndarray) -> np.ndarray:
+    # 前62bin找峰值，用峰值左右1bin做三点重心；距离=重心*60cm。
+    h = np.asarray(tof_cube, dtype=np.float64)
+    if h.shape != (IMG_H, IMG_W, TOF_FRAMES):
+        raise ValueError(f"expect cube shape {(IMG_H, IMG_W, TOF_FRAMES)}, got {h.shape}")
+
+    src = h[:, :, :TOF_HIST_VALID_BINS]
+    peak_idx = np.argmax(src, axis=2).astype(np.int64)
+    left_idx = np.clip(peak_idx - 1, 0, TOF_HIST_VALID_BINS - 1)
+    right_idx = np.clip(peak_idx + 1, 0, TOF_HIST_VALID_BINS - 1)
+
+    yy = np.arange(IMG_H)[:, None]
+    xx = np.arange(IMG_W)[None, :]
+    v_left = src[yy, xx, left_idx]
+    v_mid = src[yy, xx, peak_idx]
+    v_right = src[yy, xx, right_idx]
+    w_sum = v_left + v_mid + v_right
+
+    # 直接用bin编号做重心，距离=重心bin * 60cm。
+    p_left = left_idx.astype(np.float64)
+    p_mid = peak_idx.astype(np.float64)
+    p_right = right_idx.astype(np.float64)
+    centroid = np.where(
+        w_sum > 1e-12,
+        (v_left * p_left + v_mid * p_mid + v_right * p_right) / w_sum,
+        p_mid,
+    )
+    return np.asarray(centroid * TOF_BIN_STEP_M, dtype=np.float64)
 
 
 def _compute_bias_from_depth(depth_map_m: np.ndarray, plane_distance_m: float) -> float:
@@ -227,12 +261,14 @@ def _show_two_plots(residuals_m: np.ndarray, points: np.ndarray, normal: np.ndar
 
 if __name__ == "__main__":
     # 执行标定、保存结果并显示可视化。
-    depth_map = _load_depth_map(DATA_FILE)
+    tof_cube = _load_tof_raw_cube(DATA_FILE)
+    # 深度计算：前62bin峰值 + 左中右三点重心，再乘60cm。
+    depth_map = _depth_from_hist_centroid(tof_cube)
     bias_fixed = _compute_bias_from_depth(depth_map, PLANE_DISTANCE_M)
     depth_flat = depth_map.reshape(-1)
     u_flat, v_flat = _build_roi_uv()
 
-    # 光心固定在20x20图像中心。
+    # 光心固定在图像中心。
     cx0 = (IMG_W - 1) / 2.0
     cy0 = (IMG_H - 1) / 2.0
 

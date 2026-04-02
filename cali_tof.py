@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import math
+from scipy.optimize import minimize
+from scipy.ndimage import uniform_filter
+import matplotlib.pyplot as plt
+import numpy as np
+
+IMG_W = 20
+IMG_H = 20
+
+# 平面到相机原点的固定距离（米）。
+PLANE_DISTANCE_M = 1.4
+
+# 固定配置：直接运行脚本即可，不需要命令行参数
+DATA_FILE = "data.npy"
+
+# ===== 待优化参数初值（宏定义）=====
+F_INIT = 27.5
+AX_INIT_DEG = 0.0
+AY_INIT_DEG = 0.0
+
+# ===== 待优化参数范围（宏定义）=====
+F_MIN = 5.0
+F_MAX = 120.0
+AX_MIN_DEG = -40.0
+AX_MAX_DEG = 40.0
+AY_MIN_DEG = -40.0
+AY_MAX_DEG = 40.0
+
+# ===== 优化器参数（宏定义）=====
+POWELL_MAXITER = 4000
+POWELL_XTOL = 1e-8
+POWELL_FTOL = 1e-8
+POWELL_DISP = False
+
+
+def _build_roi_uv() -> tuple[np.ndarray, np.ndarray]:
+    # 生成20x20像素网格坐标并展平。
+    xs = np.arange(0, IMG_W, dtype=np.float64)
+    ys = np.arange(0, IMG_H, dtype=np.float64)
+    u, v = np.meshgrid(xs, ys)
+    return u.reshape(-1), v.reshape(-1)
+
+
+def _plane_normal_from_angles(ax_deg: float, ay_deg: float) -> np.ndarray:
+    # 由两个“度”单位倾角计算单位平面法向量。
+    ax = math.radians(float(ax_deg))
+    ay = math.radians(float(ay_deg))
+    # 使用两个角度参数控制倾斜量，nz 固定正向，再归一化为单位法向量。
+    n = np.array([math.tan(ax), math.tan(ay), 1.0], dtype=np.float64)
+    n_norm = float(np.linalg.norm(n))
+    if n_norm <= 1e-12:
+        return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    return n / n_norm
+
+
+def _points_from_depth(
+    depth_flat_m: np.ndarray,
+    u_flat: np.ndarray,
+    v_flat: np.ndarray,
+    f: float,
+    cx: float,
+    cy: float,
+    bias: float,
+) -> np.ndarray:
+    # 把深度图按内参反投影为3D点。
+    # 实际距离 = 测量距离 - bias。
+    d = depth_flat_m - float(bias)
+
+    uu = u_flat
+    vv = v_flat
+    dd = d
+
+    x = (uu - float(cx)) / float(f)
+    y = (vv - float(cy)) / float(f)
+
+    # 固定使用ray模型：深度视为沿光线距离，需要先归一化方向向量。
+    dirs = np.stack([x, y, np.ones_like(x)], axis=1)
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    pts = dirs * dd[:, None]
+    return pts
+
+
+def _residuals(
+    params: np.ndarray,
+    depth_flat_m: np.ndarray,
+    u_flat: np.ndarray,
+    v_flat: np.ndarray,
+    cx_fixed: float,
+    cy_fixed: float,
+    plane_distance_m: float,
+    bias_fixed_m: float,
+) -> np.ndarray:
+    # 计算每个像素点到目标平面的带符号误差。
+    f, ax_deg, ay_deg = [float(v) for v in params]
+    pts = _points_from_depth(depth_flat_m, u_flat, v_flat, f, cx_fixed, cy_fixed, bias_fixed_m)
+    n = _plane_normal_from_angles(ax_deg, ay_deg)
+    # 点到平面的有符号距离：n·p - d
+    dist = pts @ n - float(plane_distance_m)
+    return dist
+
+
+def _rms(x: np.ndarray) -> float:
+    # 计算输入向量的RMS。
+    if x.size == 0:
+        return float("inf")
+    return float(np.sqrt(np.mean(np.square(x))))
+
+
+def _load_depth_map(path: str) -> np.ndarray:
+    # 读取并检查20x20深度矩阵。
+    arr = np.load(path)
+    arr = np.asarray(arr, dtype=np.float64)
+    if arr.shape != (IMG_H, IMG_W):
+        raise ValueError(f"expect depth map shape {(IMG_H, IMG_W)}, got {arr.shape}")
+    return arr
+
+
+def _compute_bias_from_depth(depth_map_m: np.ndarray, plane_distance_m: float) -> float:
+    # 先做 5x5 均值滤波，再用最近距离减固定平面距离得到 bias。
+    filtered = uniform_filter(np.asarray(depth_map_m, dtype=np.float64), size=5, mode="nearest")
+    nearest_m = float(np.min(filtered))
+    return nearest_m - float(plane_distance_m)
+
+
+def _make_plane_mesh(
+    pts: np.ndarray,
+    n: np.ndarray,
+    d: float,
+    scale_pad: float = 0.05,
+    min_half_size: float = 0.2,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # 根据拟合平面生成用于绘制的网格面。
+    # p0 是平面上一点，满足 n·p0 = d。
+    p0 = n * float(d)
+    helper = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    if abs(float(np.dot(helper, n))) > 0.95:
+        helper = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+    e1 = np.cross(n, helper)
+    e1 /= max(float(np.linalg.norm(e1)), 1e-12)
+    e2 = np.cross(n, e1)
+    e2 /= max(float(np.linalg.norm(e2)), 1e-12)
+
+    # 根据点云分布自适应设置绘图范围，保证平面覆盖点云区域。
+    rel = pts - p0[None, :]
+    a = rel @ e1
+    b = rel @ e2
+    a_min, a_max = float(np.min(a)), float(np.max(a))
+    b_min, b_max = float(np.min(b)), float(np.max(b))
+    a_pad = max((a_max - a_min) * scale_pad, min_half_size)
+    b_pad = max((b_max - b_min) * scale_pad, min_half_size)
+    a_lin = np.linspace(a_min - a_pad, a_max + a_pad, 20)
+    b_lin = np.linspace(b_min - b_pad, b_max + b_pad, 20)
+
+    aa, bb = np.meshgrid(a_lin, b_lin)
+    xyz = p0[None, None, :] + aa[..., None] * e1[None, None, :] + bb[..., None] * e2[None, None, :]
+    return xyz[..., 0], xyz[..., 1], xyz[..., 2]
+
+
+def _draw_3d_plot(
+    ax: object,
+    points: np.ndarray,
+    residuals: np.ndarray,
+    normal: np.ndarray,
+) -> None:
+    # 在给定坐标轴上绘制3D点云和平面。
+    px, py, pz = _make_plane_mesh(points, normal, PLANE_DISTANCE_M)
+    ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=residuals, cmap="coolwarm", s=18, alpha=0.9)
+    ax.plot_surface(px, py, pz, alpha=0.35, color="tab:green", linewidth=0, antialiased=True)
+    ax.scatter([0.0], [0.0], [0.0], c="k", s=40, marker="x")
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.set_zlabel("Z (m)")
+    ax.set_title("ToF points and calibrated plane")
+    ax.set_box_aspect((1.0, 1.0, 1.0))
+
+
+def _draw_error_distribution_hist(
+    ax: object,
+    residuals_m: np.ndarray,
+) -> None:
+    # 在给定坐标轴上绘制误差分布直方图。
+    errs_cm = np.asarray(residuals_m, dtype=np.float64).reshape(-1) * 100.0
+    errs_cm = errs_cm[np.isfinite(errs_cm)]
+    if errs_cm.size == 0:
+        return
+
+    ax.hist(errs_cm, bins=30, color="steelblue", edgecolor="white", alpha=0.9)
+    ax.set_title("Error distribution")
+    ax.set_xlabel("signed error (cm)")
+    ax.set_ylabel("count")
+    ax.grid(alpha=0.25, linestyle="--")
+
+    mean_cm = float(np.mean(errs_cm))
+    std_cm = float(np.std(errs_cm))
+    # RMS 用于和终端打印一致对比。
+    rms_cm = float(np.sqrt(np.mean(errs_cm * errs_cm)))
+
+    ax.text(
+        0.02,
+        0.98,
+        f"n={errs_cm.size}, rms={rms_cm:.3f} cm",
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=10,
+    )
+
+
+def _show_two_plots(residuals_m: np.ndarray, points: np.ndarray, normal: np.ndarray) -> None:
+    # 在一个窗口里同时显示误差直方图和3D图。
+    fig = plt.figure(figsize=(14, 6))
+    ax_hist = fig.add_subplot(1, 2, 1)
+    ax_3d = fig.add_subplot(1, 2, 2, projection="3d")
+
+    _draw_error_distribution_hist(ax_hist, residuals_m)
+    _draw_3d_plot(ax_3d, points, residuals_m, normal)
+
+    fig.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
+
+if __name__ == "__main__":
+    # 执行标定、保存结果并显示可视化。
+    depth_map = _load_depth_map(DATA_FILE)
+    bias_fixed = _compute_bias_from_depth(depth_map, PLANE_DISTANCE_M)
+    depth_flat = depth_map.reshape(-1)
+    u_flat, v_flat = _build_roi_uv()
+
+    # 光心固定在20x20图像中心。
+    cx0 = (IMG_W - 1) / 2.0
+    cy0 = (IMG_H - 1) / 2.0
+
+    # 参数顺序: [f, ax, ay]，cx/cy 固定在图像中心，bias 由数据计算固定。
+    x0 = np.array(
+        [
+            F_INIT,
+            AX_INIT_DEG,
+            AY_INIT_DEG,
+        ],
+        dtype=np.float64,
+    )
+
+    bounds = [
+        (F_MIN, F_MAX),
+        (AX_MIN_DEG, AX_MAX_DEG),
+        (AY_MIN_DEG, AY_MAX_DEG),
+    ]
+
+    def objective_rms(p: np.ndarray) -> float:
+        # 优化目标：最小化所有像素点到平面的RMS误差。
+        r = _residuals(p, depth_flat, u_flat, v_flat, cx0, cy0, PLANE_DISTANCE_M, bias_fixed)
+        return _rms(r)
+
+    # Powell：不需要梯度，适合这个小维度问题快速试参。
+    pw_res = minimize(
+        objective_rms,
+        x0=np.asarray(x0, dtype=np.float64),
+        method="Powell",
+        bounds=bounds,
+        options={
+            "maxiter": POWELL_MAXITER,
+            "xtol": POWELL_XTOL,
+            "ftol": POWELL_FTOL,
+            "disp": POWELL_DISP,
+        },
+    )
+
+    # 取出优化后的最优参数，并重新计算全量残差与RMS。
+    x_opt = np.asarray(pw_res.x, dtype=np.float64)
+    r_opt = _residuals(x_opt, depth_flat, u_flat, v_flat, cx0, cy0, PLANE_DISTANCE_M, bias_fixed)
+    rms_m = _rms(r_opt)
+
+    # 解包参数并转换角度单位，便于打印阅读。
+    f, ax_deg, ay_deg = [float(v) for v in x_opt]
+    bias = float(bias_fixed)
+    cx = float(cx0)
+    cy = float(cy0)
+    normal = _plane_normal_from_angles(ax_deg, ay_deg)
+
+    # 用最优参数重建点云，并统计有效点数。
+    pts_opt = _points_from_depth(depth_flat, u_flat, v_flat, f, cx, cy, bias)
+    n_total = int(depth_flat.size)
+    n_valid = n_total
+    residual_valid = r_opt
+
+    # 打印标定结果（不写json，直接看终端）。
+    print("=== cali_tof result ===")
+    print(f"f              : {f:.6f} px")
+    print(f"cx, cy         : ({cx:.6f}, {cy:.6f}) px (fixed center)")
+    print(f"bias           : {bias:.6f} m")
+    print(f"ax, ay         : ({ax_deg:.6f}°, {ay_deg:.6f}°)")
+    print(f"rms            : {rms_m:.6f} m")
+    print(f"plane distance : {PLANE_DISTANCE_M:.6f} m (fixed)")
+
+    # 可视化：左误差分布，右3D点云+平面。
+    _show_two_plots(residual_valid, pts_opt, normal)
+

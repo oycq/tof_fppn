@@ -38,6 +38,9 @@ POWELL_XTOL = 1e-8
 POWELL_FTOL = 1e-8
 POWELL_DISP = False
 
+# ===== 误差统计参数（宏定义）=====
+WORST_ERROR_TOP_RATIO = 0.01
+
 
 def _build_roi_uv() -> tuple[np.ndarray, np.ndarray]:
     # 生成IMG_HxIMG_W像素网格坐标并展平。
@@ -324,6 +327,10 @@ if __name__ == "__main__":
     n_total = int(depth_flat.size)
     n_valid = n_total
     residual_valid = r_opt
+    abs_err = np.abs(residual_valid)
+    worst_k = max(1, int(math.ceil(abs_err.size * WORST_ERROR_TOP_RATIO)))
+    # 绝对误差降序后，第worst_k个值作为“最坏1%”的误差阈值。
+    worst_top_threshold_m = float(np.partition(abs_err, abs_err.size - worst_k)[abs_err.size - worst_k])
 
     # 打印标定结果（不写json，直接看终端）。
     print("=== cali_tof result ===")
@@ -332,6 +339,10 @@ if __name__ == "__main__":
     print(f"bias           : {bias:.6f} m")
     print(f"ax, ay         : ({ax_deg:.6f}°, {ay_deg:.6f}°)")
     print(f"rms            : {rms_m:.6f} m")
+    print(
+        f"worst {WORST_ERROR_TOP_RATIO * 100:.1f}% err: "
+        f"{worst_top_threshold_m:.6f} m (|err| threshold, k={worst_k})"
+    )
     print(f"plane distance : {PLANE_DISTANCE_M:.6f} m (fixed)")
 
     # 可视化：左误差分布，右3D点云+平面。

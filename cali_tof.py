@@ -41,6 +41,10 @@ POWELL_DISP = False
 # ===== 误差统计参数（宏定义）=====
 WORST_ERROR_TOP_RATIO = 0.01
 
+# ===== 亮度统计参数（宏定义）=====
+SAT_SCALE = 50000.0
+SAT_HIGH_BIN_WEIGHT = 1024.0
+
 
 def _build_roi_uv() -> tuple[np.ndarray, np.ndarray]:
     # 生成IMG_HxIMG_W像素网格坐标并展平。
@@ -162,6 +166,19 @@ def _compute_bias_from_depth(depth_map_m: np.ndarray, plane_distance_m: float) -
     return nearest_m - float(plane_distance_m)
 
 
+def _compute_peak_brightness(tof_cube: np.ndarray) -> np.ndarray:
+    # 参考 view_tof_hist.py：
+    # brightness = max(bin0~61) * 50000 / (bin62*1024 + bin63)
+    h = np.asarray(tof_cube, dtype=np.float64)
+    if h.shape != (IMG_H, IMG_W, TOF_FRAMES):
+        raise ValueError(f"expect cube shape {(IMG_H, IMG_W, TOF_FRAMES)}, got {h.shape}")
+
+    peak_first_62 = np.max(h[:, :, :TOF_HIST_VALID_BINS], axis=2)
+    denom = h[:, :, 62] * SAT_HIGH_BIN_WEIGHT + h[:, :, 63]
+    sat_coeff = np.where(denom > 1e-12, SAT_SCALE / denom, 0.0)
+    return peak_first_62 * sat_coeff
+
+
 def _make_plane_mesh(
     pts: np.ndarray,
     n: np.ndarray,
@@ -267,6 +284,7 @@ if __name__ == "__main__":
     tof_cube = _load_tof_raw_cube(DATA_FILE)
     # 深度计算：前62bin峰值 + 左中右三点重心，再乘60cm。
     depth_map = _depth_from_hist_centroid(tof_cube)
+    peak_brightness = _compute_peak_brightness(tof_cube)
     bias_fixed = _compute_bias_from_depth(depth_map, PLANE_DISTANCE_M)
     depth_flat = depth_map.reshape(-1)
     u_flat, v_flat = _build_roi_uv()
@@ -331,6 +349,11 @@ if __name__ == "__main__":
     worst_k = max(1, int(math.ceil(abs_err.size * WORST_ERROR_TOP_RATIO)))
     # 绝对误差降序后，第worst_k个值作为“最坏1%”的误差阈值。
     worst_top_threshold_m = float(np.partition(abs_err, abs_err.size - worst_k)[abs_err.size - worst_k])
+    pb_flat = np.asarray(peak_brightness, dtype=np.float64).reshape(-1)
+    pb_flat = pb_flat[np.isfinite(pb_flat)]
+    pb_mean = float(np.mean(pb_flat)) if pb_flat.size > 0 else 0.0
+    pb_max = float(np.max(pb_flat)) if pb_flat.size > 0 else 0.0
+    pb_min = float(np.min(pb_flat)) if pb_flat.size > 0 else 0.0
 
     # 打印标定结果（不写json，直接看终端）。
     print("=== cali_tof result ===")
@@ -343,6 +366,7 @@ if __name__ == "__main__":
         f"worst {WORST_ERROR_TOP_RATIO * 100:.1f}% err: "
         f"{worst_top_threshold_m:.6f} m (|err| threshold, k={worst_k})"
     )
+    print(f"peak brightness: mean={pb_mean:.6f}, max={pb_max:.6f}, min={pb_min:.6f}")
     print(f"plane distance : {PLANE_DISTANCE_M:.6f} m (fixed)")
 
     # 可视化：左误差分布，右3D点云+平面。

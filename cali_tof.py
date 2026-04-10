@@ -25,15 +25,15 @@ AX_INIT_DEG = 0.0
 AY_INIT_DEG = 0.0
 
 # ===== 待优化参数范围（宏定义）=====
-F_MIN = 5.0
-F_MAX = 120.0
-AX_MIN_DEG = -40.0
-AX_MAX_DEG = 40.0
-AY_MIN_DEG = -40.0
-AY_MAX_DEG = 40.0
+F_MIN = 30
+F_MAX = 60.0
+AX_MIN_DEG = -15.0
+AX_MAX_DEG = 15.0
+AY_MIN_DEG = -15.0
+AY_MAX_DEG = 15.0
 
 # ===== 优化器参数（宏定义）=====
-POWELL_MAXITER = 4000
+POWELL_MAXITER = 1000
 POWELL_XTOL = 1e-8
 POWELL_FTOL = 1e-8
 POWELL_DISP = False

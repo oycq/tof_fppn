@@ -45,6 +45,9 @@ WORST_ERROR_TOP_RATIO = 0.01
 SAT_SCALE = 50000.0
 SAT_HIGH_BIN_WEIGHT = 1024.0
 
+# ===== plot缩放尺度 =====
+VISUAL_RES_SCALE = 2.0
+
 
 def _build_roi_uv() -> tuple[np.ndarray, np.ndarray]:
     # 生成IMG_HxIMG_W像素网格坐标并展平。
@@ -278,10 +281,41 @@ def _show_two_plots(residuals_m: np.ndarray, points: np.ndarray, normal: np.ndar
     plt.close(fig)
 
 
+def _fig_to_rgb_image(fig: object) -> np.ndarray:
+    # 把 matplotlib Figure 渲染为 HxWx3 的 uint8 RGB 图像。
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)
+    return np.asarray(buf[:, :, :3], dtype=np.uint8)
 
-if __name__ == "__main__":
-    # 执行标定、保存结果并显示可视化。
-    tof_cube = _load_tof_raw_cube(DATA_FILE)
+
+def _render_hist_image(residuals_m: np.ndarray) -> np.ndarray:
+    # 渲染误差直方图并返回图像。
+    fig = plt.figure(figsize=(7 * VISUAL_RES_SCALE, 6 * VISUAL_RES_SCALE))
+    ax = fig.add_subplot(1, 1, 1)
+    _draw_error_distribution_hist(ax, residuals_m)
+    fig.tight_layout()
+    img = _fig_to_rgb_image(fig)
+    plt.close(fig)
+    return img
+
+
+def _render_3d_image(points: np.ndarray, residuals_m: np.ndarray, normal: np.ndarray) -> np.ndarray:
+    # 渲染3D点云+平面图并返回图像。
+    fig = plt.figure(figsize=(7 * VISUAL_RES_SCALE, 6 * VISUAL_RES_SCALE))
+    ax = fig.add_subplot(1, 1, 1, projection="3d")
+    _draw_3d_plot(ax, points, residuals_m, normal)
+    fig.tight_layout()
+    img = _fig_to_rgb_image(fig)
+    plt.close(fig)
+    return img
+
+def calibrate_tof(
+    data_file: str = DATA_FILE,
+    interactive_show: bool = False,
+) -> dict[str, object]:
+    # 执行标定并返回关键结果。
+    tof_cube = _load_tof_raw_cube(data_file)
     # 深度计算：前62bin峰值 + 左中右三点重心，再乘60cm。
     depth_map = _depth_from_hist_centroid(tof_cube)
     peak_brightness = _compute_peak_brightness(tof_cube)
@@ -294,20 +328,8 @@ if __name__ == "__main__":
     cy0 = (IMG_H - 1) / 2.0
 
     # 参数顺序: [f, ax, ay]，cx/cy 固定在图像中心，bias 由数据计算固定。
-    x0 = np.array(
-        [
-            F_INIT,
-            AX_INIT_DEG,
-            AY_INIT_DEG,
-        ],
-        dtype=np.float64,
-    )
-
-    bounds = [
-        (F_MIN, F_MAX),
-        (AX_MIN_DEG, AX_MAX_DEG),
-        (AY_MIN_DEG, AY_MAX_DEG),
-    ]
+    x0 = np.array([F_INIT, AX_INIT_DEG, AY_INIT_DEG], dtype=np.float64)
+    bounds = [(F_MIN, F_MAX), (AX_MIN_DEG, AX_MAX_DEG), (AY_MIN_DEG, AY_MAX_DEG)]
 
     def objective_rms(p: np.ndarray) -> float:
         # 优化目标：最小化所有像素点到平面的RMS误差。
@@ -320,12 +342,7 @@ if __name__ == "__main__":
         x0=np.asarray(x0, dtype=np.float64),
         method="Powell",
         bounds=bounds,
-        options={
-            "maxiter": POWELL_MAXITER,
-            "xtol": POWELL_XTOL,
-            "ftol": POWELL_FTOL,
-            "disp": POWELL_DISP,
-        },
+        options={"maxiter": POWELL_MAXITER, "xtol": POWELL_XTOL, "ftol": POWELL_FTOL, "disp": POWELL_DISP},
     )
 
     # 取出优化后的最优参数，并重新计算全量残差与RMS。
@@ -340,10 +357,8 @@ if __name__ == "__main__":
     cy = float(cy0)
     normal = _plane_normal_from_angles(ax_deg, ay_deg)
 
-    # 用最优参数重建点云，并统计有效点数。
+    # 用最优参数重建点云并统计结果。
     pts_opt = _points_from_depth(depth_flat, u_flat, v_flat, f, cx, cy, bias)
-    n_total = int(depth_flat.size)
-    n_valid = n_total
     residual_valid = r_opt
     abs_err = np.abs(residual_valid)
     worst_k = max(1, int(math.ceil(abs_err.size * WORST_ERROR_TOP_RATIO)))
@@ -355,7 +370,27 @@ if __name__ == "__main__":
     pb_max = float(np.max(pb_flat)) if pb_flat.size > 0 else 0.0
     pb_min = float(np.min(pb_flat)) if pb_flat.size > 0 else 0.0
 
-    # 打印标定结果（不写json，直接看终端）。
+    visual_result = np.concatenate(
+        [
+            _render_hist_image(residual_valid),
+            _render_3d_image(pts_opt, residual_valid, normal),
+        ],
+        axis=1,
+    )
+
+    result = {
+        "f": f,
+        "bias": bias,
+        "ax": ax_deg,
+        "ay": ay_deg,
+        "rms": rms_m,
+        "worst": worst_top_threshold_m,
+        "peak_mean": pb_mean,
+        "peak_max": pb_max,
+        "peak_min": pb_min,
+        "visual_result": visual_result,
+    }
+
     print("=== cali_tof result ===")
     print(f"f              : {f:.6f} px")
     print(f"cx, cy         : ({cx:.6f}, {cy:.6f}) px (fixed center)")
@@ -369,6 +404,13 @@ if __name__ == "__main__":
     print(f"peak brightness: mean={pb_mean:.6f}, max={pb_max:.6f}, min={pb_min:.6f}")
     print(f"plane distance : {PLANE_DISTANCE_M:.6f} m (fixed)")
 
-    # 可视化：左误差分布，右3D点云+平面。
-    _show_two_plots(residual_valid, pts_opt, normal)
+    if interactive_show:
+        # 可选交互显示，不影响返回的visual_result。
+        _show_two_plots(residual_valid, pts_opt, normal)
+
+    return result
+
+
+if __name__ == "__main__":
+    calibrate_tof(data_file=DATA_FILE)
 

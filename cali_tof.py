@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 
 import math
+import json
+from pathlib import Path
+import cv2
 from scipy.optimize import minimize
 from scipy.ndimage import uniform_filter
 import matplotlib.pyplot as plt
@@ -48,6 +51,9 @@ SAT_HIGH_BIN_WEIGHT = 1024.0
 # ===== plot缩放尺度 =====
 VISUAL_RES_SCALE = 2.0
 
+# ===== 阈值配置文件名（位于本文件同目录）=====
+THRESHOLD_JSON_NAME = "threshold.json"
+METRIC_NAMES = ("f", "bias", "ax", "ay", "rms", "worst", "peak_mean", "peak_max", "peak_min")
 
 def _build_roi_uv() -> tuple[np.ndarray, np.ndarray]:
     # 生成IMG_HxIMG_W像素网格坐标并展平。
@@ -391,25 +397,78 @@ def calibrate_tof(
         "visual_result": visual_result,
     }
 
-    print("=== cali_tof result ===")
-    print(f"f              : {f:.6f} px")
-    print(f"cx, cy         : ({cx:.6f}, {cy:.6f}) px (fixed center)")
-    print(f"bias           : {bias:.6f} m")
-    print(f"ax, ay         : ({ax_deg:.6f}°, {ay_deg:.6f}°)")
-    print(f"rms            : {rms_m:.6f} m")
-    print(
-        f"worst {WORST_ERROR_TOP_RATIO * 100:.1f}% err: "
-        f"{worst_top_threshold_m:.6f} m (|err| threshold, k={worst_k})"
-    )
-    print(f"peak brightness: mean={pb_mean:.6f}, max={pb_max:.6f}, min={pb_min:.6f}")
-    print(f"plane distance : {PLANE_DISTANCE_M:.6f} m (fixed)")
-
     if interactive_show:
         # 可选交互显示，不影响返回的visual_result。
         _show_two_plots(residual_valid, pts_opt, normal)
 
     return result
 
+
+def _metric_in_range(value: float, cfg: dict[str, float]) -> tuple[bool, str]:
+    # 只支持且要求同时提供 min / max。
+    if "min" not in cfg or "max" not in cfg:
+        raise ValueError("threshold config must contain both 'min' and 'max'")
+    min_v = float(cfg["min"])
+    max_v = float(cfg["max"])
+    if value < min_v:
+        return False, f"{value:.4f}, range=[{min_v:.4f}, {max_v:.4f}]"
+    if value > max_v:
+        return False, f"{value:.4f}, range=[{min_v:.4f}, {max_v:.4f}]"
+    return True, ""
+
+
+def check(raw_file: str) -> tuple[bool, str, list[float], np.ndarray]:
+    # 调用标定并根据阈值文件做合格性检查，然后打印固定格式结果。
+    cali_res = calibrate_tof(raw_file, interactive_show=False)
+
+    threshold_path = Path(__file__).resolve().parent / THRESHOLD_JSON_NAME
+    with open(threshold_path, "r", encoding="utf-8") as fp:
+        threshold_cfg = json.load(fp)
+
+    issues: list[str] = []
+    failed_metric_names: set[str] = set()
+    for name in METRIC_NAMES:
+        if name not in threshold_cfg:
+            raise ValueError(f"missing threshold for metric '{name}'")
+        ok, reason = _metric_in_range(float(cali_res[name]), threshold_cfg[name])
+        if not ok:
+            issues.append(f"{name} = {reason}")
+            failed_metric_names.add(name)
+
+    is_pass = len(issues) == 0
+    desc = "OK" if is_pass else "; ".join(issues)
+    data = [float(cali_res[name]) for name in METRIC_NAMES]
+    visual_result = np.asarray(cali_res["visual_result"])
+
+    print(f"pass      : {is_pass}")
+    print(f"desc      : {desc}")
+    lines = [f"pass      : {is_pass}", f"desc      : {desc}"]
+    for name, value in zip(METRIC_NAMES, data):
+        min_v = float(threshold_cfg[name]["min"])
+        max_v = float(threshold_cfg[name]["max"])
+        line = f"{name:10s}: {value:10.4f}   thr:[{min_v:8.4f}, {max_v:8.4f}]"
+        lines.append(line)
+        print(line)
+
+    # 在图像上方新增黑色信息栏，避免遮挡原图内容。
+    bgr = cv2.cvtColor(visual_result, cv2.COLOR_RGB2BGR)
+    info_h = 20 + 30 * len(lines)
+    canvas = np.zeros((bgr.shape[0] + info_h, bgr.shape[1], 3), dtype=np.uint8)
+    canvas[info_h:, :, :] = bgr
+    title_color = (0, 220, 0) if is_pass else (0, 0, 255)
+    for idx, line in enumerate(lines):
+        y = 30 + idx * 30
+        if idx == 0:
+            color = title_color
+        elif idx == 1:
+            color = (255, 255, 255)
+        else:
+            metric_name = METRIC_NAMES[idx - 2]
+            color = (0, 0, 255) if metric_name in failed_metric_names else (255, 255, 255)
+        cv2.putText(canvas, line, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2, cv2.LINE_AA)
+    visual_result = canvas
+
+    return is_pass, desc, data, visual_result
 
 if __name__ == "__main__":
     calibrate_tof(data_file=DATA_FILE)

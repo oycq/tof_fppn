@@ -11,13 +11,13 @@ IMG_W = 40
 IMG_H = 30
 TOF_FRAMES = 64
 TOF_HIST_VALID_BINS = 62
-TOF_BIN_STEP_M = 0.15
+TOF_BIN_STEP_M = 0.15 * 4
 
 # 平面到相机原点的固定距离（米）。
 PLANE_DISTANCE_M = 1.4
 
 # 固定配置：直接运行脚本即可，不需要命令行参数
-DATA_FILE = "tof.raw"
+DATA_FILE = "tof_60cm.raw"
 
 # ===== 待优化参数初值（宏定义）=====
 F_INIT = 47

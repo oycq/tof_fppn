@@ -4,7 +4,7 @@
 import cv2
 import numpy as np
 
-RAW_FILE = "tof.raw"
+RAW_FILE = "tof_60cm.raw"
 IMG_H = 30
 IMG_W = 40
 BIN_COUNT = 64
@@ -46,7 +46,7 @@ def draw_hist_image(hist_values: np.ndarray, px: int, py: int, brightness_value:
     b_draw = b[:62]
     tail_63 = float(b[62]) if b.size > 62 else 0.0
     tail_64 = float(b[63]) if b.size > 63 else 0.0
-    sum_all_bins = float(np.sum(b))
+    sum_first_62 = float(np.sum(b_draw))
     sat_value = tail_63 * 1024.0 + tail_64
     max_first_62 = float(np.max(b_draw)) if b_draw.size > 0 else 0.0
 
@@ -71,7 +71,7 @@ def draw_hist_image(hist_values: np.ndarray, px: int, py: int, brightness_value:
     cv2.putText(canvas, f"pixel=({px}, {py})", (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (220, 220, 220), 1, cv2.LINE_AA)
     cv2.putText(canvas, f"brightness(y)={float(brightness_value):.3f}", (10, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (220, 220, 220), 1, cv2.LINE_AA)
     cv2.putText(canvas, f"max_0_61={max_first_62:.3f}", (10, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (220, 220, 220), 1, cv2.LINE_AA)
-    cv2.putText(canvas, f"sum_0_63={sum_all_bins:.3f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (220, 220, 220), 1, cv2.LINE_AA)
+    cv2.putText(canvas, f"sum_0_61={sum_first_62:.3f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (220, 220, 220), 1, cv2.LINE_AA)
     cv2.putText(canvas, f"sat=bin63*1024+bin64={sat_value:.3f}", (10, 144), cv2.FONT_HERSHEY_SIMPLEX, 0.54, (220, 220, 220), 1, cv2.LINE_AA)
     return canvas
 

@@ -70,7 +70,14 @@ WORST_ERROR_TOP_RATIO = 0.01
 SAT_SCALE = 50000.0
 SAT_HIGH_BIN_WEIGHT = 1024.0
 
-VISUAL_RES_SCALE = 2.0
+# 左侧 figure 渲染参数:
+#   - figsize 始终按 (target_w / _VISUAL_DPI, target_h / _VISUAL_DPI) 算,
+#     这样字号 / 坐标轴线宽相对目标尺寸是固定比例,不会变形。
+#   - 内部用 dpi = _VISUAL_DPI * _VISUAL_OVERSAMPLE 渲染,得到 2x 像素的
+#     超采样图,然后 INTER_AREA 下采样到目标尺寸。这一步是 supersample
+#     抗锯齿:对 3D 点云、细线条特别有效,字体也会更锐利。
+_VISUAL_DPI = 100
+_VISUAL_OVERSAMPLE = 2
 
 _METRIC_NAMES: tuple[str, ...] = (
     "f", "ax", "ay",
@@ -190,6 +197,7 @@ def _compute_extra_metrics(tof_cube: np.ndarray) -> dict[str, Any]:
         },
         "bin0_per_pixel":  bin0,
         "peak_per_pixel":  peak_per_pixel,
+        "noise_block":     noise_block,           # (H, W, NOISE_BIN_HI - NOISE_BIN_LO)
         "dead_mask":       dead_mask,
     }
 
@@ -294,32 +302,41 @@ def _make_plane_mesh(
 
 def _draw_3d_plot(ax: Any, points: np.ndarray, residuals: np.ndarray, normal: np.ndarray) -> None:
     px, py, pz = _make_plane_mesh(points, normal, PLANE_DISTANCE_M)
-    ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=residuals, cmap="coolwarm", s=22, alpha=0.9)
-    ax.plot_surface(px, py, pz, alpha=0.35, color="tab:green", linewidth=0, antialiased=True)
-    ax.scatter([0.0], [0.0], [0.0], c="k", s=60, marker="x")
-    # labelpad 让放大后的轴标签不和刻度撞在一起。
-    ax.set_xlabel("X (m)", labelpad=14)
-    ax.set_ylabel("Y (m)", labelpad=14)
-    ax.set_zlabel("Z (m)", labelpad=14)
-    ax.set_title("ToF 点云 + 拟合平面", pad=18)
-    ax.set_box_aspect((1.0, 1.0, 1.0))
+    ax.scatter(
+        points[:, 0], points[:, 1], points[:, 2],
+        c=residuals, cmap="coolwarm", s=8, alpha=0.85,
+        depthshade=True,
+    )
+    ax.plot_surface(px, py, pz, alpha=0.30, color="tab:green", linewidth=0, antialiased=True)
+    ax.scatter([0.0], [0.0], [0.0], c="k", s=28, marker="x", linewidths=1.5)
+    ax.set_xlabel("X (m)", labelpad=4)
+    ax.set_ylabel("Y (m)", labelpad=4)
+    ax.set_zlabel("Z (m)", labelpad=4)
+    ax.set_title("ToF 点云 + 拟合平面", pad=6)
+    # 点云在 z 方向几乎是一片薄板,把 z 方向压扁,让 X/Y 维度占满更多
+    # 视觉空间,3D 散点不再挤成一团。
+    ax.set_box_aspect((1.4, 1.4, 0.9))
 
 
-def _draw_error_distribution_hist(ax: Any, residuals_m: np.ndarray) -> None:
+def _draw_parallelism_hist(ax: Any, residuals_m: np.ndarray) -> None:
+    """平行度分布：拟合平面残差越窄 → 越平行。"""
     errs_cm = np.asarray(residuals_m, dtype=np.float64).reshape(-1) * 100.0
     errs_cm = errs_cm[np.isfinite(errs_cm)]
     if errs_cm.size == 0:
         return
 
     ax.hist(errs_cm, bins=30, color=_HIST_COLOR, edgecolor="white", alpha=0.9)
-    ax.set_title("误差分布", pad=14)
-    ax.set_xlabel("误差 (cm)", labelpad=10)
-    ax.set_ylabel("数量", labelpad=10)
+    ax.set_title("平行度分布", pad=6)
+    ax.set_xlabel("残差 (cm)", labelpad=4)
+    ax.set_ylabel("数量", labelpad=4)
     ax.grid(alpha=0.25, linestyle="--")
     rms_cm = float(np.sqrt(np.mean(errs_cm * errs_cm)))
+    worst_cm = float(np.max(np.abs(errs_cm)))
     ax.text(
         0.02, 0.98,
-        f"样本={errs_cm.size}, RMS={rms_cm:.3f} cm",
+        f"样本 = {errs_cm.size}\n"
+        f"RMS  = {rms_cm:.3f} cm\n"
+        f"最大 = {worst_cm:.3f} cm",
         transform=ax.transAxes,
         va="top", ha="left",
     )
@@ -333,9 +350,9 @@ def _draw_brightness_hist(ax: Any, brightness_map: np.ndarray) -> None:
         return
 
     ax.hist(vals, bins=30, color=_HIST_COLOR, edgecolor="white", alpha=0.9)
-    ax.set_title("亮度分布", pad=14)
-    ax.set_xlabel("亮度", labelpad=10)
-    ax.set_ylabel("数量", labelpad=10)
+    ax.set_title("亮度分布", pad=6)
+    ax.set_xlabel("亮度", labelpad=4)
+    ax.set_ylabel("数量", labelpad=4)
     ax.grid(alpha=0.25, linestyle="--")
     ax.text(
         0.02, 0.98,
@@ -355,9 +372,9 @@ def _draw_crosstalk_hist(ax: Any, bin0_per_pixel: np.ndarray) -> None:
         return
 
     ax.hist(vals, bins=30, color=_HIST_COLOR, edgecolor="white", alpha=0.9)
-    ax.set_title("串光分布 (bin[0])", pad=14)
-    ax.set_xlabel("bin[0] 补偿值", labelpad=10)
-    ax.set_ylabel("数量", labelpad=10)
+    ax.set_title("串光分布 (bin[0])", pad=6)
+    ax.set_xlabel("bin[0] 补偿值", labelpad=4)
+    ax.set_ylabel("数量", labelpad=4)
     ax.grid(alpha=0.25, linestyle="--")
     mean_v = float(vals.mean())
     max_v = float(vals.max())
@@ -372,28 +389,29 @@ def _draw_crosstalk_hist(ax: Any, bin0_per_pixel: np.ndarray) -> None:
     )
 
 
-def _draw_center_pixel_hist(ax: Any, tof_cube: np.ndarray) -> None:
-    """画 ToF 中心像素前 62 个 bin 的直方图。"""
-    cy = IMG_H // 2
-    cx = IMG_W // 2
-    bins = np.asarray(tof_cube[cy, cx, :TOF_HIST_VALID_BINS], dtype=np.float64)
-    idx = np.arange(bins.size)
-    peak_bin = int(np.argmax(bins)) if bins.size > 0 else -1
+def _draw_noise_hist(ax: Any, noise_block: np.ndarray) -> None:
+    """底噪直方图：所有像素 bin[NOISE_LO:NOISE_HI] 补偿值的整体分布。"""
+    vals = np.asarray(noise_block, dtype=np.float64).reshape(-1)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return
 
-    ax.bar(idx, bins, width=1.0, color=_HIST_COLOR, edgecolor="white", linewidth=0.4)
-    if peak_bin >= 0:
-        ax.axvline(peak_bin, color="red", linestyle="--", linewidth=1.4, alpha=0.8)
-    ax.set_title(f"中心像素 ({cy}, {cx}) 直方图", pad=14)
-    ax.set_xlabel("bin 编号 (0~61)", labelpad=10)
-    ax.set_ylabel("数量", labelpad=10)
+    ax.hist(vals, bins=30, color=_HIST_COLOR, edgecolor="white", alpha=0.9)
+    ax.set_title(f"底噪分布 (bin[{NOISE_BIN_LO}:{NOISE_BIN_HI}])", pad=6)
+    ax.set_xlabel("bin 补偿值", labelpad=4)
+    ax.set_ylabel("数量", labelpad=4)
     ax.grid(alpha=0.25, linestyle="--")
-    if peak_bin >= 0:
-        ax.text(
-            0.98, 0.98,
-            f"峰值 bin = {peak_bin}\n峰值数 = {float(bins[peak_bin]):.1f}",
-            transform=ax.transAxes,
-            va="top", ha="right",
-        )
+    mean_v = float(vals.mean())
+    max_v = float(vals.max())
+    ratio = max_v / mean_v if mean_v > 1e-12 else float("nan")
+    ax.text(
+        0.02, 0.98,
+        f"均值 = {mean_v:.2f}\n"
+        f"最大 = {max_v:.2f}\n"
+        f"max/mean = {ratio:.2f}",
+        transform=ax.transAxes,
+        va="top", ha="left",
+    )
 
 
 def _draw_brightness_image(ax: Any, brightness_map: np.ndarray) -> None:
@@ -410,28 +428,55 @@ def _draw_brightness_image(ax: Any, brightness_map: np.ndarray) -> None:
         interpolation="nearest",
         aspect="equal",
     )
-    ax.set_title("图像亮度", pad=14)
-    ax.set_xlabel("列", labelpad=10)
-    ax.set_ylabel("行", labelpad=10)
+    ax.set_title("图像亮度", pad=6)
+    ax.set_xlabel("列", labelpad=4)
+    ax.set_ylabel("行", labelpad=4)
     cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.ax.tick_params(labelsize=_CBAR_TICK_FONTSIZE)
 
 
-def _draw_residual_image(ax: Any, residuals_m: np.ndarray) -> None:
-    """把每像素残差画成 30x40 热图（带符号 cm）。"""
-    res_cm = np.asarray(residuals_m, dtype=np.float64).reshape(IMG_H, IMG_W) * 100.0
-    vmax = float(max(np.max(np.abs(res_cm)), 1e-6))
+def _draw_crosstalk_image(ax: Any, bin0_per_pixel: np.ndarray) -> None:
+    """串光 2D 图：每像素 bin[0] 补偿值。"""
+    arr = np.asarray(bin0_per_pixel, dtype=np.float64)
+    vmax = float(np.nanmax(arr)) if arr.size else 1.0
+    if not np.isfinite(vmax) or vmax <= 0.0:
+        vmax = 1.0
     im = ax.imshow(
-        res_cm,
-        cmap="coolwarm",
-        vmin=-vmax,
+        arr,
+        cmap="magma",
+        vmin=0.0,
         vmax=vmax,
         interpolation="nearest",
         aspect="equal",
     )
-    ax.set_title("单像素残差 (cm)", pad=14)
-    ax.set_xlabel("列", labelpad=10)
-    ax.set_ylabel("行", labelpad=10)
+    ax.set_title("串光分布 (bin[0])", pad=6)
+    ax.set_xlabel("列", labelpad=4)
+    ax.set_ylabel("行", labelpad=4)
+    cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.ax.tick_params(labelsize=_CBAR_TICK_FONTSIZE)
+
+
+def _draw_noise_image(ax: Any, noise_block: np.ndarray) -> None:
+    """底噪 2D 图：每像素在 bin[NOISE_LO:NOISE_HI] 上取最大值,凸显异常底噪点。"""
+    arr = np.asarray(noise_block, dtype=np.float64)
+    if arr.ndim == 3:
+        arr2d = np.max(arr, axis=2)
+    else:
+        arr2d = arr
+    vmax = float(np.nanmax(arr2d)) if arr2d.size else 1.0
+    if not np.isfinite(vmax) or vmax <= 0.0:
+        vmax = 1.0
+    im = ax.imshow(
+        arr2d,
+        cmap="magma",
+        vmin=0.0,
+        vmax=vmax,
+        interpolation="nearest",
+        aspect="equal",
+    )
+    ax.set_title("底噪 (各像素 max)", pad=6)
+    ax.set_xlabel("列", labelpad=4)
+    ax.set_ylabel("行", labelpad=4)
     cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.ax.tick_params(labelsize=_CBAR_TICK_FONTSIZE)
 
@@ -462,27 +507,28 @@ _CN_FONT_FAMILY = [
 ]
 
 
-# matplotlib 默认字体偏小（10pt），左侧 figure 又会被压缩到面板高度,
-# 字体显得太细。中文字体本身笔画就重,不再额外 bold,避免糊在一起。
+# 左侧 figure 直接渲染到目标像素 (~1240 x 760, dpi=100),
+# 字号按这个分辨率挑成"清晰且不占满子图"的水平。
+# 中文字体笔画本身就重,不再 bold,避免糊在一起。
 _PLOT_RC = {
     "font.family":         "sans-serif",
     "font.sans-serif":     _CN_FONT_FAMILY,
     "axes.unicode_minus":  False,
-    "font.size":           26,
-    "axes.titlesize":      32,
-    "axes.labelsize":      26,
-    "xtick.labelsize":     22,
-    "ytick.labelsize":     22,
-    "legend.fontsize":     24,
+    "font.size":           8,
+    "axes.titlesize":      10,
+    "axes.labelsize":      8,
+    "xtick.labelsize":     7,
+    "ytick.labelsize":     7,
+    "legend.fontsize":     7,
     "axes.titleweight":    "normal",
     "axes.labelweight":    "normal",
-    "axes.linewidth":      1.4,
-    "xtick.major.width":   1.2,
-    "ytick.major.width":   1.2,
+    "axes.linewidth":      0.8,
+    "xtick.major.width":   0.7,
+    "ytick.major.width":   0.7,
 }
 
-# 颜色条刻度字号；与 tick 字号大致一致,但稍小,避免占用 figure 空间。
-_CBAR_TICK_FONTSIZE = 20
+# 颜色条刻度字号；与 tick 字号匹配。
+_CBAR_TICK_FONTSIZE = 7
 
 
 def _render_visual_left(
@@ -491,42 +537,66 @@ def _render_visual_left(
     normal: np.ndarray,
     brightness_map: np.ndarray,
     bin0_per_pixel: np.ndarray,
-    tof_cube: np.ndarray,
+    noise_block: np.ndarray,
+    target_size: tuple[int, int],
 ) -> np.ndarray:
-    """渲染 2x3 拼接图（BGR）：
+    """渲染 2x4 拼接图（BGR）。
 
-    +---------------------+----------------------+----------------------+
-    | (1,1) 亮度直方图     | (1,2) 误差直方图      | (1,3) 中心像素 62-bin |
-    +---------------------+----------------------+----------------------+
-    | (2,1) 亮度矩阵图     | (2,2) 串光直方图      | (2,3) 3D 点云 + 平面  |
-    +---------------------+----------------------+----------------------+
+    figure 直接按 ``target_size = (target_w, target_h)`` 像素绘制,
+    后续不再做 ``cv2.resize`` 缩放,所以字体/坐标轴不会被二次拉伸,
+    保证清晰、不变形。
+
+    布局:
+
+    +-------------+-------------+-------------+-------------+
+    | (1,1) 亮度  | (1,2) 串光  | (1,3) 底噪  | (1,4) 平行度|
+    |     直方图  |     直方图  |     直方图  |     直方图  |
+    +-------------+-------------+-------------+-------------+
+    | (2,1) 亮度  | (2,2) 串光  | (2,3) 底噪  | (2,4) 3D    |
+    |     2D 图   |     2D 图   |     2D 图   |     点云    |
+    +-------------+-------------+-------------+-------------+
     """
+    target_w, target_h = int(target_size[0]), int(target_size[1])
+    target_w = max(target_w, 1)
+    target_h = max(target_h, 1)
+
     with plt.rc_context(_PLOT_RC):
-        fig = plt.figure(figsize=(18 * VISUAL_RES_SCALE, 12 * VISUAL_RES_SCALE))
+        # figsize 按"目标像素 / 基准 dpi"算,字号相对画面比例 = 设定值。
+        # 实际渲染 dpi 加倍 (oversample),让 3D 散点 / 细线条以 2x 精度绘制。
+        fig = plt.figure(
+            figsize=(target_w / _VISUAL_DPI, target_h / _VISUAL_DPI),
+            dpi=_VISUAL_DPI * _VISUAL_OVERSAMPLE,
+        )
+        # 直方图信息密度低,2D / 3D 图细节更多,让第二行更高,3D 点云
+        # 的可视区显著扩大,不再"小家子气"。
+        gs = fig.add_gridspec(2, 4, height_ratios=[0.85, 1.15])
 
-        ax_bhist = fig.add_subplot(2, 3, 1)
-        _draw_brightness_hist(ax_bhist, brightness_map)
+        # row 1 — 直方图
+        _draw_brightness_hist(fig.add_subplot(gs[0, 0]), brightness_map)
+        _draw_crosstalk_hist(fig.add_subplot(gs[0, 1]),  bin0_per_pixel)
+        _draw_noise_hist(fig.add_subplot(gs[0, 2]),      noise_block)
+        _draw_parallelism_hist(fig.add_subplot(gs[0, 3]), residuals_m)
 
-        ax_ehist = fig.add_subplot(2, 3, 2)
-        _draw_error_distribution_hist(ax_ehist, residuals_m)
-
-        ax_chist = fig.add_subplot(2, 3, 3)
-        _draw_center_pixel_hist(ax_chist, tof_cube)
-
-        ax_bimg = fig.add_subplot(2, 3, 4)
-        _draw_brightness_image(ax_bimg, brightness_map)
-
-        ax_xtalk = fig.add_subplot(2, 3, 5)
-        _draw_crosstalk_hist(ax_xtalk, bin0_per_pixel)
-
-        ax_3d = fig.add_subplot(2, 3, 6, projection="3d")
+        # row 2 — 2D / 3D 图
+        _draw_brightness_image(fig.add_subplot(gs[1, 0]), brightness_map)
+        _draw_crosstalk_image(fig.add_subplot(gs[1, 1]),  bin0_per_pixel)
+        _draw_noise_image(fig.add_subplot(gs[1, 2]),      noise_block)
+        ax_3d = fig.add_subplot(gs[1, 3], projection="3d")
         _draw_3d_plot(ax_3d, points, residuals_m, normal)
 
-        fig.tight_layout()
+        # 子图间距收紧,让格子之间的留白尽量小,作图区相对更大。
+        fig.tight_layout(pad=0.3, w_pad=0.2, h_pad=0.2)
         rgb = _fig_to_rgb_image(fig)
         plt.close(fig)
 
-    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+    # supersample 之后用 INTER_AREA 下采样到目标尺寸,等价于盒式平均抗锯齿,
+    # 文字 / 3D 点云都比直接小 dpi 渲染更锐利。
+    if bgr.shape[:2] != (target_h, target_w):
+        bgr = cv2.resize(bgr, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+    return bgr
 
 
 # ---------------------------------------------------------------------------
@@ -737,8 +807,10 @@ def _draw_test_panel(
     cv2.line(panel, (pad_x, title_h - 4), (panel_w - pad_x, title_h - 4), (110, 110, 110), 1)
 
     col_name_x = pad_x
-    col_measured_right = int(panel_w * 0.50)
-    col_threshold_x = col_measured_right + 12
+    # measured 列稍微左移,留更多宽度给 threshold 字段(如 "[50.000, 59.000]"),
+    # 这样 panel 整体可以缩窄而不截字。
+    col_measured_right = int(panel_w * 0.46)
+    col_threshold_x = col_measured_right + 10
     col_status_right = panel_w - pad_x
 
     section_color = (170, 200, 255)
@@ -781,7 +853,7 @@ def _draw_test_panel(
 # 拼接：左 visual + 右 panel
 # ---------------------------------------------------------------------------
 _OUTPUT_WIDTH = 1800
-_PANEL_WIDTH = 560
+_PANEL_WIDTH = 500
 _PANEL_SEP_WIDTH = 2
 _LEFT_WIDTH = _OUTPUT_WIDTH - _PANEL_WIDTH - _PANEL_SEP_WIDTH
 _HEADER_HEIGHT = 50
@@ -789,34 +861,38 @@ _HEADER_HEIGHT = 50
 
 def _compose_combined_image(
     visual_left_bgr: np.ndarray,
-    sections: list[tuple[str, list[dict[str, str]]]],
-    overall_pass: bool,
+    panel: np.ndarray,
 ) -> np.ndarray:
-    src = visual_left_bgr
-    sh, sw = int(src.shape[0]), int(src.shape[1])
+    """把"已经按目标像素绘好"的左侧 figure 与右侧 panel 拼起来。
+
+    入参约定:
+      - ``visual_left_bgr.shape[1] == _LEFT_WIDTH``
+      - ``visual_left_bgr.shape[0] == panel.shape[0] - _HEADER_HEIGHT``
+      - ``panel.shape[1] == _PANEL_WIDTH``
+
+    满足以上约定后这里就是 ``vstack(header, body) | sep | panel`` 的纯拼接,
+    完全不做任何 ``cv2.resize``,所以左侧 plot 字体不会被二次缩放。
+    """
+    panel_h = int(panel.shape[0])
     target_w = _LEFT_WIDTH
-    body_h = max(int(round(sh * target_w / max(sw, 1))), 1)
-    body = cv2.resize(src, (target_w, body_h), interpolation=cv2.INTER_AREA)
 
     header = np.zeros((_HEADER_HEIGHT, target_w, 3), dtype=np.uint8)
     _put_text(
         header,
-        "ToF 标定可视化（亮度分布 / 误差分布 / 中心像素 hist / 亮度图 / 串光分布 / 3D 点云）",
+        "ToF 标定可视化(亮度 / 串光 / 底噪 / 平行度 直方图 + 亮度 / 串光 / 底噪 2D + 3D 点云)",
         (12, 34), (255, 255, 255), size=22, bold=True,
     )
-    left = np.vstack([header, body])
+    left = np.vstack([header, visual_left_bgr])
 
-    panel = _draw_test_panel(sections, overall_pass, _PANEL_WIDTH)
+    # 兜底:理论上 left.shape[0] == panel_h,如有 1~2 行误差再最近邻对齐。
+    if left.shape[0] != panel_h:
+        if left.shape[0] < panel_h:
+            pad = np.zeros((panel_h - left.shape[0], target_w, 3), dtype=np.uint8)
+            left = np.vstack([left, pad])
+        else:
+            left = left[:panel_h]
 
-    out_h = max(left.shape[0], panel.shape[0])
-    if left.shape[0] < out_h:
-        pad = np.zeros((out_h - left.shape[0], left.shape[1], 3), dtype=np.uint8)
-        left = np.vstack([left, pad])
-    if panel.shape[0] < out_h:
-        pad = np.full((out_h - panel.shape[0], panel.shape[1], 3), 24, dtype=np.uint8)
-        panel = np.vstack([panel, pad])
-
-    sep = np.full((out_h, _PANEL_SEP_WIDTH, 3), 70, dtype=np.uint8)
+    sep = np.full((panel_h, _PANEL_SEP_WIDTH, 3), 70, dtype=np.uint8)
     return np.hstack([left, sep, panel])
 
 
@@ -888,6 +964,7 @@ def _calibrate(tof_cube: np.ndarray) -> dict[str, Any]:
         # peak_per_pixel 既是亮度图,也是打光强度的源头。
         "brightness_map": extra["peak_per_pixel"],
         "bin0_per_pixel": extra["bin0_per_pixel"],
+        "noise_block":    extra["noise_block"],
         "dead_mask":      extra["dead_mask"],
     }
 
@@ -909,12 +986,12 @@ def run_all_checks(tof_raw_path: str) -> tuple[bool, np.ndarray, list[float]]:
         passed : bool
             所有 metric 同时落在阈值范围内。
         image : numpy.ndarray
-            BGR 图像，左侧为 2x3 标定可视化：
-            行 1 为三个直方图（亮度分布 / 误差分布 / 中心像素 62-bin），
-            行 2 为亮度矩阵图 / 串光直方图 / 3D 点云 + 拟合平面；
-            右侧为产测项目面板，按"几何标定 / FPPN 检测 / 平面度 /
-            坏点检测 / 串光检测 / 底噪检测 / 打光强度"分组，每一项
-            都列出 measured / threshold / 状态。
+            BGR 图像，左侧为 2x4 标定可视化：
+            行 1 = 亮度 / 串光 / 底噪 / 平行度 四张直方图，
+            行 2 = 亮度 2D / 串光 2D / 底噪 2D / 3D 点云 + 拟合平面；
+            右侧为产测项目面板，按"坏点 / 串光 / 底噪 / 打光 / 几何
+            标定 / FPPN / 平面度"分组,每一项都列出 measured / threshold /
+            状态。
         params : list[float]
             13 个 metric 数值,顺序固定为：
             ``[f(px), ax(deg), ay(deg),
@@ -943,11 +1020,17 @@ def run_all_checks(tof_raw_path: str) -> tuple[bool, np.ndarray, list[float]]:
     values = cali["values"]
     sections, overall_pass = _build_sections(values)
 
+    # 先把右侧 panel 画出来,以它的高度为基准决定左侧 figure 的目标像素,
+    # 让左侧从一开始就按"最终像素尺寸"渲染,避免事后 resize 把字体压糊。
+    panel = _draw_test_panel(sections, overall_pass, _PANEL_WIDTH)
+    target_body_h = max(int(panel.shape[0]) - _HEADER_HEIGHT, 1)
+
     visual_left_bgr = _render_visual_left(
         cali["residuals"], cali["points"], cali["normal"],
-        cali["brightness_map"], cali["bin0_per_pixel"], tof_cube,
+        cali["brightness_map"], cali["bin0_per_pixel"], cali["noise_block"],
+        target_size=(_LEFT_WIDTH, target_body_h),
     )
-    image = _compose_combined_image(visual_left_bgr, sections, overall_pass)
+    image = _compose_combined_image(visual_left_bgr, panel)
 
     params: list[float] = [float(values[name]) for name in _METRIC_NAMES]
     return bool(overall_pass), image, params

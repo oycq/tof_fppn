@@ -235,7 +235,7 @@ def _draw_3d_plot(ax: Any, points: np.ndarray, residuals: np.ndarray, normal: np
     ax.set_xlabel("X (m)", labelpad=14)
     ax.set_ylabel("Y (m)", labelpad=14)
     ax.set_zlabel("Z (m)", labelpad=14)
-    ax.set_title("ToF points and calibrated plane", pad=18)
+    ax.set_title("ToF 点云 + 拟合平面", pad=18)
     ax.set_box_aspect((1.0, 1.0, 1.0))
 
 
@@ -246,14 +246,14 @@ def _draw_error_distribution_hist(ax: Any, residuals_m: np.ndarray) -> None:
         return
 
     ax.hist(errs_cm, bins=30, color=_HIST_COLOR, edgecolor="white", alpha=0.9)
-    ax.set_title("Error distribution", pad=14)
-    ax.set_xlabel("signed error (cm)", labelpad=10)
-    ax.set_ylabel("count", labelpad=10)
+    ax.set_title("误差分布", pad=14)
+    ax.set_xlabel("误差 (cm)", labelpad=10)
+    ax.set_ylabel("数量", labelpad=10)
     ax.grid(alpha=0.25, linestyle="--")
     rms_cm = float(np.sqrt(np.mean(errs_cm * errs_cm)))
     ax.text(
         0.02, 0.98,
-        f"n={errs_cm.size}, rms={rms_cm:.3f} cm",
+        f"样本={errs_cm.size}, RMS={rms_cm:.3f} cm",
         transform=ax.transAxes,
         va="top", ha="left",
     )
@@ -267,18 +267,17 @@ def _draw_brightness_hist(ax: Any, brightness_map: np.ndarray) -> None:
         return
 
     ax.hist(vals, bins=30, color=_HIST_COLOR, edgecolor="white", alpha=0.9)
-    ax.set_title("Brightness distribution", pad=14)
-    ax.set_xlabel("brightness", labelpad=10)
-    ax.set_ylabel("count", labelpad=10)
+    ax.set_title("亮度分布", pad=14)
+    ax.set_xlabel("亮度", labelpad=10)
+    ax.set_ylabel("数量", labelpad=10)
     ax.grid(alpha=0.25, linestyle="--")
     ax.text(
         0.02, 0.98,
-        f"mean={float(vals.mean()):.1f}\n"
-        f"min ={float(vals.min()):.1f}\n"
-        f"max ={float(vals.max()):.1f}",
+        f"均值 = {float(vals.mean()):.1f}\n"
+        f"最小 = {float(vals.min()):.1f}\n"
+        f"最大 = {float(vals.max()):.1f}",
         transform=ax.transAxes,
         va="top", ha="left",
-        family="monospace",
     )
 
 
@@ -293,17 +292,16 @@ def _draw_center_pixel_hist(ax: Any, tof_cube: np.ndarray) -> None:
     ax.bar(idx, bins, width=1.0, color=_HIST_COLOR, edgecolor="white", linewidth=0.4)
     if peak_bin >= 0:
         ax.axvline(peak_bin, color="red", linestyle="--", linewidth=1.4, alpha=0.8)
-    ax.set_title(f"Center pixel ({cy}, {cx}) histogram", pad=14)
-    ax.set_xlabel("bin index (0..61)", labelpad=10)
-    ax.set_ylabel("count", labelpad=10)
+    ax.set_title(f"中心像素 ({cy}, {cx}) 直方图", pad=14)
+    ax.set_xlabel("bin 编号 (0~61)", labelpad=10)
+    ax.set_ylabel("数量", labelpad=10)
     ax.grid(alpha=0.25, linestyle="--")
     if peak_bin >= 0:
         ax.text(
             0.98, 0.98,
-            f"peak bin={peak_bin}\nmax ={float(bins[peak_bin]):.1f}",
+            f"峰值 bin = {peak_bin}\n峰值数 = {float(bins[peak_bin]):.1f}",
             transform=ax.transAxes,
             va="top", ha="right",
-            family="monospace",
         )
 
 
@@ -321,11 +319,11 @@ def _draw_brightness_image(ax: Any, brightness_map: np.ndarray) -> None:
         interpolation="nearest",
         aspect="equal",
     )
-    ax.set_title("Brightness", pad=14)
-    ax.set_xlabel("col", labelpad=10)
-    ax.set_ylabel("row", labelpad=10)
+    ax.set_title("图像亮度", pad=14)
+    ax.set_xlabel("列", labelpad=10)
+    ax.set_ylabel("行", labelpad=10)
     cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.ax.tick_params(labelsize=16)
+    cbar.ax.tick_params(labelsize=_CBAR_TICK_FONTSIZE)
 
 
 def _draw_residual_image(ax: Any, residuals_m: np.ndarray) -> None:
@@ -340,11 +338,11 @@ def _draw_residual_image(ax: Any, residuals_m: np.ndarray) -> None:
         interpolation="nearest",
         aspect="equal",
     )
-    ax.set_title("Per-pixel residual (cm)", pad=14)
-    ax.set_xlabel("col", labelpad=10)
-    ax.set_ylabel("row", labelpad=10)
+    ax.set_title("单像素残差 (cm)", pad=14)
+    ax.set_xlabel("列", labelpad=10)
+    ax.set_ylabel("行", labelpad=10)
     cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.ax.tick_params(labelsize=16)
+    cbar.ax.tick_params(labelsize=_CBAR_TICK_FONTSIZE)
 
 
 def _fig_to_rgb_image(fig: Any) -> np.ndarray:
@@ -359,21 +357,41 @@ def _fig_to_rgb_image(fig: Any) -> np.ndarray:
 _HIST_COLOR = "steelblue"
 
 
+# 中文字体优先级：Windows 微软雅黑 → 黑体 → 跨平台兜底。
+# 任意一个没装也能 fallback 到下一个,负号用 ASCII '-' 避免显示方块。
+_CN_FONT_FAMILY = [
+    "Microsoft YaHei",
+    "SimHei",
+    "Microsoft JhengHei",
+    "Noto Sans CJK SC",
+    "WenQuanYi Micro Hei",
+    "PingFang SC",
+    "Arial",
+    "DejaVu Sans",
+]
+
+
 # matplotlib 默认字体偏小（10pt），左侧 figure 又会被压缩到面板高度,
-# 字体显得太细。这里整体调到 ~22pt,缩放后仍清晰可读。
+# 字体显得太细。中文字体本身笔画就重,不再额外 bold,避免糊在一起。
 _PLOT_RC = {
-    "font.size":         22,
-    "axes.titlesize":    26,
-    "axes.labelsize":    22,
-    "xtick.labelsize":   18,
-    "ytick.labelsize":   18,
-    "legend.fontsize":   20,
-    "axes.titleweight":  "bold",
-    "axes.labelweight":  "bold",
-    "axes.linewidth":    1.4,
-    "xtick.major.width": 1.2,
-    "ytick.major.width": 1.2,
+    "font.family":         "sans-serif",
+    "font.sans-serif":     _CN_FONT_FAMILY,
+    "axes.unicode_minus":  False,
+    "font.size":           26,
+    "axes.titlesize":      32,
+    "axes.labelsize":      26,
+    "xtick.labelsize":     22,
+    "ytick.labelsize":     22,
+    "legend.fontsize":     24,
+    "axes.titleweight":    "normal",
+    "axes.labelweight":    "normal",
+    "axes.linewidth":      1.4,
+    "xtick.major.width":   1.2,
+    "ytick.major.width":   1.2,
 }
+
+# 颜色条刻度字号；与 tick 字号大致一致,但稍小,避免占用 figure 空间。
+_CBAR_TICK_FONTSIZE = 20
 
 
 def _render_visual_left(

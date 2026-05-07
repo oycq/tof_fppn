@@ -228,13 +228,14 @@ def _make_plane_mesh(
 
 def _draw_3d_plot(ax: Any, points: np.ndarray, residuals: np.ndarray, normal: np.ndarray) -> None:
     px, py, pz = _make_plane_mesh(points, normal, PLANE_DISTANCE_M)
-    ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=residuals, cmap="coolwarm", s=18, alpha=0.9)
+    ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=residuals, cmap="coolwarm", s=22, alpha=0.9)
     ax.plot_surface(px, py, pz, alpha=0.35, color="tab:green", linewidth=0, antialiased=True)
-    ax.scatter([0.0], [0.0], [0.0], c="k", s=40, marker="x")
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
-    ax.set_zlabel("Z (m)")
-    ax.set_title("ToF points and calibrated plane")
+    ax.scatter([0.0], [0.0], [0.0], c="k", s=60, marker="x")
+    # labelpad 让放大后的轴标签不和刻度撞在一起。
+    ax.set_xlabel("X (m)", labelpad=14)
+    ax.set_ylabel("Y (m)", labelpad=14)
+    ax.set_zlabel("Z (m)", labelpad=14)
+    ax.set_title("ToF points and calibrated plane", pad=18)
     ax.set_box_aspect((1.0, 1.0, 1.0))
 
 
@@ -245,9 +246,9 @@ def _draw_error_distribution_hist(ax: Any, residuals_m: np.ndarray) -> None:
         return
 
     ax.hist(errs_cm, bins=30, color="steelblue", edgecolor="white", alpha=0.9)
-    ax.set_title("Error distribution")
-    ax.set_xlabel("signed error (cm)")
-    ax.set_ylabel("count")
+    ax.set_title("Error distribution", pad=14)
+    ax.set_xlabel("signed error (cm)", labelpad=10)
+    ax.set_ylabel("count", labelpad=10)
     ax.grid(alpha=0.25, linestyle="--")
     rms_cm = float(np.sqrt(np.mean(errs_cm * errs_cm)))
     ax.text(
@@ -255,7 +256,6 @@ def _draw_error_distribution_hist(ax: Any, residuals_m: np.ndarray) -> None:
         f"n={errs_cm.size}, rms={rms_cm:.3f} cm",
         transform=ax.transAxes,
         va="top", ha="left",
-        fontsize=10,
     )
 
 
@@ -266,23 +266,41 @@ def _fig_to_rgb_image(fig: Any) -> np.ndarray:
     return np.asarray(buf[:, :, :3], dtype=np.uint8)
 
 
+# matplotlib 默认字体偏小（10pt），左侧 figure 又会被压缩到面板高度,
+# 字体显得太细。这里整体调到 ~22pt,缩放后仍清晰可读。
+_PLOT_RC = {
+    "font.size":         22,
+    "axes.titlesize":    26,
+    "axes.labelsize":    22,
+    "xtick.labelsize":   18,
+    "ytick.labelsize":   18,
+    "legend.fontsize":   20,
+    "axes.titleweight":  "bold",
+    "axes.labelweight":  "bold",
+    "axes.linewidth":    1.4,
+    "xtick.major.width": 1.2,
+    "ytick.major.width": 1.2,
+}
+
+
 def _render_visual_left(
     residuals_m: np.ndarray, points: np.ndarray, normal: np.ndarray
 ) -> np.ndarray:
     """渲染"误差直方图 + 3D 点云"横向拼接图（BGR）。"""
-    fig_hist = plt.figure(figsize=(7 * VISUAL_RES_SCALE, 6 * VISUAL_RES_SCALE))
-    ax_hist = fig_hist.add_subplot(1, 1, 1)
-    _draw_error_distribution_hist(ax_hist, residuals_m)
-    fig_hist.tight_layout()
-    hist_img = _fig_to_rgb_image(fig_hist)
-    plt.close(fig_hist)
+    with plt.rc_context(_PLOT_RC):
+        fig_hist = plt.figure(figsize=(7 * VISUAL_RES_SCALE, 6 * VISUAL_RES_SCALE))
+        ax_hist = fig_hist.add_subplot(1, 1, 1)
+        _draw_error_distribution_hist(ax_hist, residuals_m)
+        fig_hist.tight_layout()
+        hist_img = _fig_to_rgb_image(fig_hist)
+        plt.close(fig_hist)
 
-    fig_3d = plt.figure(figsize=(7 * VISUAL_RES_SCALE, 6 * VISUAL_RES_SCALE))
-    ax_3d = fig_3d.add_subplot(1, 1, 1, projection="3d")
-    _draw_3d_plot(ax_3d, points, residuals_m, normal)
-    fig_3d.tight_layout()
-    plot3d_img = _fig_to_rgb_image(fig_3d)
-    plt.close(fig_3d)
+        fig_3d = plt.figure(figsize=(7 * VISUAL_RES_SCALE, 6 * VISUAL_RES_SCALE))
+        ax_3d = fig_3d.add_subplot(1, 1, 1, projection="3d")
+        _draw_3d_plot(ax_3d, points, residuals_m, normal)
+        fig_3d.tight_layout()
+        plot3d_img = _fig_to_rgb_image(fig_3d)
+        plt.close(fig_3d)
 
     rgb = np.concatenate([hist_img, plot3d_img], axis=1)
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)

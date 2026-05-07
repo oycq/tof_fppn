@@ -245,7 +245,7 @@ def _draw_error_distribution_hist(ax: Any, residuals_m: np.ndarray) -> None:
     if errs_cm.size == 0:
         return
 
-    ax.hist(errs_cm, bins=30, color="steelblue", edgecolor="white", alpha=0.9)
+    ax.hist(errs_cm, bins=30, color=_HIST_COLOR, edgecolor="white", alpha=0.9)
     ax.set_title("Error distribution", pad=14)
     ax.set_xlabel("signed error (cm)", labelpad=10)
     ax.set_ylabel("count", labelpad=10)
@@ -259,11 +259,104 @@ def _draw_error_distribution_hist(ax: Any, residuals_m: np.ndarray) -> None:
     )
 
 
+def _draw_brightness_hist(ax: Any, brightness_map: np.ndarray) -> None:
+    """亮度分布直方图：标注 mean / min / max。"""
+    vals = np.asarray(brightness_map, dtype=np.float64).reshape(-1)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return
+
+    ax.hist(vals, bins=30, color=_HIST_COLOR, edgecolor="white", alpha=0.9)
+    ax.set_title("Brightness distribution", pad=14)
+    ax.set_xlabel("brightness", labelpad=10)
+    ax.set_ylabel("count", labelpad=10)
+    ax.grid(alpha=0.25, linestyle="--")
+    ax.text(
+        0.02, 0.98,
+        f"mean={float(vals.mean()):.1f}\n"
+        f"min ={float(vals.min()):.1f}\n"
+        f"max ={float(vals.max()):.1f}",
+        transform=ax.transAxes,
+        va="top", ha="left",
+        family="monospace",
+    )
+
+
+def _draw_center_pixel_hist(ax: Any, tof_cube: np.ndarray) -> None:
+    """画 ToF 中心像素前 62 个 bin 的直方图。"""
+    cy = IMG_H // 2
+    cx = IMG_W // 2
+    bins = np.asarray(tof_cube[cy, cx, :TOF_HIST_VALID_BINS], dtype=np.float64)
+    idx = np.arange(bins.size)
+    peak_bin = int(np.argmax(bins)) if bins.size > 0 else -1
+
+    ax.bar(idx, bins, width=1.0, color=_HIST_COLOR, edgecolor="white", linewidth=0.4)
+    if peak_bin >= 0:
+        ax.axvline(peak_bin, color="red", linestyle="--", linewidth=1.4, alpha=0.8)
+    ax.set_title(f"Center pixel ({cy}, {cx}) histogram", pad=14)
+    ax.set_xlabel("bin index (0..61)", labelpad=10)
+    ax.set_ylabel("count", labelpad=10)
+    ax.grid(alpha=0.25, linestyle="--")
+    if peak_bin >= 0:
+        ax.text(
+            0.98, 0.98,
+            f"peak bin={peak_bin}\nmax ={float(bins[peak_bin]):.1f}",
+            transform=ax.transAxes,
+            va="top", ha="right",
+            family="monospace",
+        )
+
+
+def _draw_brightness_image(ax: Any, brightness_map: np.ndarray) -> None:
+    """显示 30x40 亮度图：vmax 直接取数据最大值,自适应配色。"""
+    arr = np.asarray(brightness_map, dtype=np.float64)
+    vmax = float(np.nanmax(arr)) if arr.size else 1.0
+    if not np.isfinite(vmax) or vmax <= 0.0:
+        vmax = 1.0
+    im = ax.imshow(
+        arr,
+        cmap="gray",
+        vmin=0.0,
+        vmax=vmax,
+        interpolation="nearest",
+        aspect="equal",
+    )
+    ax.set_title("Brightness", pad=14)
+    ax.set_xlabel("col", labelpad=10)
+    ax.set_ylabel("row", labelpad=10)
+    cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.ax.tick_params(labelsize=16)
+
+
+def _draw_residual_image(ax: Any, residuals_m: np.ndarray) -> None:
+    """把每像素残差画成 30x40 热图（带符号 cm）。"""
+    res_cm = np.asarray(residuals_m, dtype=np.float64).reshape(IMG_H, IMG_W) * 100.0
+    vmax = float(max(np.max(np.abs(res_cm)), 1e-6))
+    im = ax.imshow(
+        res_cm,
+        cmap="coolwarm",
+        vmin=-vmax,
+        vmax=vmax,
+        interpolation="nearest",
+        aspect="equal",
+    )
+    ax.set_title("Per-pixel residual (cm)", pad=14)
+    ax.set_xlabel("col", labelpad=10)
+    ax.set_ylabel("row", labelpad=10)
+    cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.ax.tick_params(labelsize=16)
+
+
 def _fig_to_rgb_image(fig: Any) -> np.ndarray:
     fig.canvas.draw()
     w, h = fig.canvas.get_width_height()
     buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)
     return np.asarray(buf[:, :, :3], dtype=np.uint8)
+
+
+# 三个直方图（亮度分布 / 误差分布 / 中心像素 hist）共用一个颜色,
+# 视觉上更统一,也便于一眼把三张 hist 与下方矩阵图区分开。
+_HIST_COLOR = "steelblue"
 
 
 # matplotlib 默认字体偏小（10pt），左侧 figure 又会被压缩到面板高度,
@@ -284,25 +377,45 @@ _PLOT_RC = {
 
 
 def _render_visual_left(
-    residuals_m: np.ndarray, points: np.ndarray, normal: np.ndarray
+    residuals_m: np.ndarray,
+    points: np.ndarray,
+    normal: np.ndarray,
+    brightness_map: np.ndarray,
+    tof_cube: np.ndarray,
 ) -> np.ndarray:
-    """渲染"误差直方图 + 3D 点云"横向拼接图（BGR）。"""
+    """渲染 2x3 拼接图（BGR）：
+
+    +---------------------+----------------------+----------------------+
+    | (1,1) 亮度直方图     | (1,2) 误差直方图      | (1,3) 中心像素 62-bin |
+    +---------------------+----------------------+----------------------+
+    | (2,1) 亮度矩阵图     | (2,2) 误差矩阵图      | (2,3) 3D 点云 + 平面  |
+    +---------------------+----------------------+----------------------+
+    """
     with plt.rc_context(_PLOT_RC):
-        fig_hist = plt.figure(figsize=(7 * VISUAL_RES_SCALE, 6 * VISUAL_RES_SCALE))
-        ax_hist = fig_hist.add_subplot(1, 1, 1)
-        _draw_error_distribution_hist(ax_hist, residuals_m)
-        fig_hist.tight_layout()
-        hist_img = _fig_to_rgb_image(fig_hist)
-        plt.close(fig_hist)
+        fig = plt.figure(figsize=(18 * VISUAL_RES_SCALE, 12 * VISUAL_RES_SCALE))
 
-        fig_3d = plt.figure(figsize=(7 * VISUAL_RES_SCALE, 6 * VISUAL_RES_SCALE))
-        ax_3d = fig_3d.add_subplot(1, 1, 1, projection="3d")
+        ax_bhist = fig.add_subplot(2, 3, 1)
+        _draw_brightness_hist(ax_bhist, brightness_map)
+
+        ax_ehist = fig.add_subplot(2, 3, 2)
+        _draw_error_distribution_hist(ax_ehist, residuals_m)
+
+        ax_chist = fig.add_subplot(2, 3, 3)
+        _draw_center_pixel_hist(ax_chist, tof_cube)
+
+        ax_bimg = fig.add_subplot(2, 3, 4)
+        _draw_brightness_image(ax_bimg, brightness_map)
+
+        ax_resid = fig.add_subplot(2, 3, 5)
+        _draw_residual_image(ax_resid, residuals_m)
+
+        ax_3d = fig.add_subplot(2, 3, 6, projection="3d")
         _draw_3d_plot(ax_3d, points, residuals_m, normal)
-        fig_3d.tight_layout()
-        plot3d_img = _fig_to_rgb_image(fig_3d)
-        plt.close(fig_3d)
 
-    rgb = np.concatenate([hist_img, plot3d_img], axis=1)
+        fig.tight_layout()
+        rgb = _fig_to_rgb_image(fig)
+        plt.close(fig)
+
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
 
@@ -536,8 +649,11 @@ def _compose_combined_image(
     body = cv2.resize(src, (target_w, body_h), interpolation=cv2.INTER_AREA)
 
     header = np.zeros((_HEADER_HEIGHT, target_w, 3), dtype=np.uint8)
-    _put_text(header, "ToF 标定可视化（误差分布 / 点云 + 拟合平面）",
-              (12, 34), (255, 255, 255), size=22, bold=True)
+    _put_text(
+        header,
+        "ToF 标定可视化（亮度分布 / 误差分布 / 中心像素 hist / 亮度图 / 残差图 / 3D 点云）",
+        (12, 34), (255, 255, 255), size=22, bold=True,
+    )
     left = np.vstack([header, body])
 
     panel = _draw_test_panel(sections, overall_pass, _PANEL_WIDTH)
@@ -625,6 +741,7 @@ def _calibrate(tof_cube: np.ndarray) -> dict[str, Any]:
         "residuals": r_opt,
         "points": pts_opt,
         "normal": normal,
+        "brightness_map": np.asarray(peak_brightness, dtype=np.float64),
     }
 
 
@@ -645,9 +762,11 @@ def run_all_checks(tof_raw_path: str) -> tuple[bool, np.ndarray, list[float]]:
         passed : bool
             所有 metric 同时落在阈值范围内。
         image : numpy.ndarray
-            BGR 图像，左侧为标定可视化（误差直方图 + 3D 点云），
-            右侧为产测项目面板（按"几何标定 / 平面误差 / 光度统计"
-            分组，每一项都列出 measured / threshold / 状态）。
+            BGR 图像，左侧为 2x3 标定可视化：
+            行 1 为三个直方图（亮度分布 / 误差分布 / 中心像素 62-bin），
+            行 2 为亮度矩阵图 / 残差矩阵图 / 3D 点云 + 拟合平面；
+            右侧为产测项目面板（按"几何标定 / 平面误差 / 光度统计"分组，
+            每一项都列出 measured / threshold / 状态）。
         params : list[float]
             9 个 metric 数值，顺序固定为
             ``[f(px), bias(cm), ax(deg), ay(deg),
@@ -669,7 +788,10 @@ def run_all_checks(tof_raw_path: str) -> tuple[bool, np.ndarray, list[float]]:
     values = cali["values"]
     sections, overall_pass = _build_sections(values)
 
-    visual_left_bgr = _render_visual_left(cali["residuals"], cali["points"], cali["normal"])
+    visual_left_bgr = _render_visual_left(
+        cali["residuals"], cali["points"], cali["normal"],
+        cali["brightness_map"], tof_cube,
+    )
     image = _compose_combined_image(visual_left_bgr, sections, overall_pass)
 
     params: list[float] = [float(values[name]) for name in _METRIC_NAMES]

@@ -158,11 +158,26 @@ NOISE_BIN_LO = 30
 NOISE_BIN_HI = 50  # 不含
 
 
+def _topk_pixel_positions(score_map: np.ndarray, k: int) -> list[tuple[int, int]]:
+    """返回 ``score_map`` 中得分最高的 k 个像素位置 (row, col),按降序。"""
+    arr = np.asarray(score_map, dtype=np.float64)
+    flat = arr.reshape(-1)
+    n = flat.size
+    if n == 0 or k <= 0:
+        return []
+    k = min(k, n)
+    idx = np.argpartition(flat, n - k)[-k:]
+    idx = idx[np.argsort(flat[idx])[::-1]]
+    w = arr.shape[1] if arr.ndim >= 2 else 1
+    return [(int(i // w), int(i % w)) for i in idx]
+
+
 def _compute_extra_metrics(tof_cube: np.ndarray) -> dict[str, Any]:
     """从 raw cube 抽出新增的 7 个产测量。
 
     所有 max / mean 类指标都基于 *补偿后* 的 hist。
-    返回 dict 同时携带绘图所需的中间产物。
+    返回 dict 同时携带绘图所需的中间产物 (含完整 compensated cube,
+    以及串扰 / 底噪 top-2 像素位置用于第 3 行单像素直方图)。
     """
     h = np.asarray(tof_cube, dtype=np.float64)
     raw62 = h[:, :, :TOF_HIST_VALID_BINS]
@@ -178,12 +193,21 @@ def _compute_extra_metrics(tof_cube: np.ndarray) -> dict[str, Any]:
     crosstalk_mean = float(np.mean(bin0)) if bin0.size else 0.0
 
     noise_block = comp[:, :, NOISE_BIN_LO:NOISE_BIN_HI]
-    noise_max = float(np.max(noise_block)) if noise_block.size else 0.0
-    noise_mean = float(np.mean(noise_block)) if noise_block.size else 0.0
+    # 底噪以"每像素 bin[NOISE_LO:NOISE_HI] 均值"为基本单位,再对所有像素
+    # 取 max/mean,与"打光强度"按像素 peak 统计的口径保持一致。
+    noise_per_pixel = (
+        np.mean(noise_block, axis=2) if noise_block.size else np.zeros_like(bin0)
+    )
+    noise_max = float(np.max(noise_per_pixel)) if noise_per_pixel.size else 0.0
+    noise_mean = float(np.mean(noise_per_pixel)) if noise_per_pixel.size else 0.0
 
     peak_per_pixel = np.max(comp, axis=2) if comp.size else np.zeros((IMG_H, IMG_W))
     light_max = float(np.max(peak_per_pixel)) if peak_per_pixel.size else 0.0
     light_mean = float(np.mean(peak_per_pixel)) if peak_per_pixel.size else 0.0
+
+    # 串光 top-2: 按 bin[0] 排序;底噪 top-2: 按"每像素 bin[NOISE_LO:NOISE_HI] 均值"排序。
+    crosstalk_top2 = _topk_pixel_positions(bin0, k=2)
+    noise_top2 = _topk_pixel_positions(noise_per_pixel, k=2)
 
     return {
         "values": {
@@ -198,7 +222,11 @@ def _compute_extra_metrics(tof_cube: np.ndarray) -> dict[str, Any]:
         "bin0_per_pixel":  bin0,
         "peak_per_pixel":  peak_per_pixel,
         "noise_block":     noise_block,           # (H, W, NOISE_BIN_HI - NOISE_BIN_LO)
+        "noise_per_pixel": noise_per_pixel,       # (H, W) 每像素 bin[30:50] 均值
         "dead_mask":       dead_mask,
+        "comp_cube":       comp,                  # (H, W, 62) 补偿后,供单像素 hist 用
+        "crosstalk_top2":  crosstalk_top2,
+        "noise_top2":      noise_top2,
     }
 
 
@@ -333,12 +361,11 @@ def _draw_parallelism_hist(ax: Any, residuals_m: np.ndarray) -> None:
     rms_cm = float(np.sqrt(np.mean(errs_cm * errs_cm)))
     worst_cm = float(np.max(np.abs(errs_cm)))
     ax.text(
-        0.02, 0.98,
-        f"样本 = {errs_cm.size}\n"
+        0.98, 0.98,
         f"RMS  = {rms_cm:.3f} cm\n"
         f"最大 = {worst_cm:.3f} cm",
         transform=ax.transAxes,
-        va="top", ha="left",
+        va="top", ha="right",
     )
 
 
@@ -355,12 +382,12 @@ def _draw_brightness_hist(ax: Any, brightness_map: np.ndarray) -> None:
     ax.set_ylabel("数量", labelpad=4)
     ax.grid(alpha=0.25, linestyle="--")
     ax.text(
-        0.02, 0.98,
+        0.98, 0.98,
         f"均值 = {float(vals.mean()):.1f}\n"
         f"最小 = {float(vals.min()):.1f}\n"
         f"最大 = {float(vals.max()):.1f}",
         transform=ax.transAxes,
-        va="top", ha="left",
+        va="top", ha="right",
     )
 
 
@@ -376,41 +403,33 @@ def _draw_crosstalk_hist(ax: Any, bin0_per_pixel: np.ndarray) -> None:
     ax.set_xlabel("bin[0] 补偿值", labelpad=4)
     ax.set_ylabel("数量", labelpad=4)
     ax.grid(alpha=0.25, linestyle="--")
-    mean_v = float(vals.mean())
-    max_v = float(vals.max())
-    ratio = max_v / mean_v if mean_v > 1e-12 else float("nan")
     ax.text(
-        0.02, 0.98,
-        f"均值 = {mean_v:.1f}\n"
-        f"最大 = {max_v:.1f}\n"
-        f"max/mean = {ratio:.2f}",
+        0.98, 0.98,
+        f"均值 = {float(vals.mean()):.1f}\n"
+        f"最大 = {float(vals.max()):.1f}",
         transform=ax.transAxes,
-        va="top", ha="left",
+        va="top", ha="right",
     )
 
 
-def _draw_noise_hist(ax: Any, noise_block: np.ndarray) -> None:
-    """底噪直方图：所有像素 bin[NOISE_LO:NOISE_HI] 补偿值的整体分布。"""
-    vals = np.asarray(noise_block, dtype=np.float64).reshape(-1)
+def _draw_noise_hist(ax: Any, noise_per_pixel: np.ndarray) -> None:
+    """底噪直方图：每像素 bin[NOISE_LO:NOISE_HI] 均值的分布。"""
+    vals = np.asarray(noise_per_pixel, dtype=np.float64).reshape(-1)
     vals = vals[np.isfinite(vals)]
     if vals.size == 0:
         return
 
     ax.hist(vals, bins=30, color=_HIST_COLOR, edgecolor="white", alpha=0.9)
-    ax.set_title(f"底噪分布 (bin[{NOISE_BIN_LO}:{NOISE_BIN_HI}])", pad=6)
-    ax.set_xlabel("bin 补偿值", labelpad=4)
+    ax.set_title(f"底噪分布 (各像素 bin[{NOISE_BIN_LO}:{NOISE_BIN_HI}] 均值)", pad=6)
+    ax.set_xlabel("底噪", labelpad=4)
     ax.set_ylabel("数量", labelpad=4)
     ax.grid(alpha=0.25, linestyle="--")
-    mean_v = float(vals.mean())
-    max_v = float(vals.max())
-    ratio = max_v / mean_v if mean_v > 1e-12 else float("nan")
     ax.text(
-        0.02, 0.98,
-        f"均值 = {mean_v:.2f}\n"
-        f"最大 = {max_v:.2f}\n"
-        f"max/mean = {ratio:.2f}",
+        0.98, 0.98,
+        f"均值 = {float(vals.mean()):.2f}\n"
+        f"最大 = {float(vals.max()):.2f}",
         transform=ax.transAxes,
-        va="top", ha="left",
+        va="top", ha="right",
     )
 
 
@@ -456,29 +475,70 @@ def _draw_crosstalk_image(ax: Any, bin0_per_pixel: np.ndarray) -> None:
     cbar.ax.tick_params(labelsize=_CBAR_TICK_FONTSIZE)
 
 
-def _draw_noise_image(ax: Any, noise_block: np.ndarray) -> None:
-    """底噪 2D 图：每像素在 bin[NOISE_LO:NOISE_HI] 上取最大值,凸显异常底噪点。"""
-    arr = np.asarray(noise_block, dtype=np.float64)
+def _draw_noise_image(ax: Any, noise_per_pixel: np.ndarray) -> None:
+    """底噪 2D 图：每像素 bin[NOISE_LO:NOISE_HI] 均值,凸显底噪偏高的像素。"""
+    arr = np.asarray(noise_per_pixel, dtype=np.float64)
     if arr.ndim == 3:
-        arr2d = np.max(arr, axis=2)
-    else:
-        arr2d = arr
-    vmax = float(np.nanmax(arr2d)) if arr2d.size else 1.0
+        arr = np.mean(arr, axis=2)
+    vmax = float(np.nanmax(arr)) if arr.size else 1.0
     if not np.isfinite(vmax) or vmax <= 0.0:
         vmax = 1.0
     im = ax.imshow(
-        arr2d,
+        arr,
         cmap="magma",
         vmin=0.0,
         vmax=vmax,
         interpolation="nearest",
         aspect="equal",
     )
-    ax.set_title("底噪 (各像素 max)", pad=6)
+    ax.set_title(f"底噪 (bin[{NOISE_BIN_LO}:{NOISE_BIN_HI}] 均值)", pad=6)
     ax.set_xlabel("列", labelpad=4)
     ax.set_ylabel("行", labelpad=4)
     cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.ax.tick_params(labelsize=_CBAR_TICK_FONTSIZE)
+
+
+def _draw_pixel_bin_hist(
+    ax: Any,
+    bins_62: np.ndarray,
+    pos: tuple[int, int],
+    title_prefix: str,
+    highlight_range: tuple[int, int] | None = None,
+    annotation: str | None = None,
+) -> None:
+    """绘制单个像素的 bin[0:62] 补偿值柱状图。
+
+    ``highlight_range = (lo, hi)`` 用橙红色高亮关注区间(串光高亮 bin[0],
+    底噪高亮 bin[NOISE_LO:NOISE_HI]),便于一眼对位。
+    ``annotation`` 写在右上角,通常用来标这个像素的 metric 数值,
+    比如 "串光 = 222.0" 或 "底噪 = 23.45"。
+    """
+    vals = np.asarray(bins_62, dtype=np.float64).reshape(-1)
+    n = vals.size
+    x = np.arange(n)
+
+    ax.bar(x, vals, width=1.0, color=_HIST_COLOR, edgecolor="none")
+    if highlight_range is not None and n > 0:
+        lo = max(int(highlight_range[0]), 0)
+        hi = min(int(highlight_range[1]), n)
+        if hi > lo:
+            ax.bar(
+                x[lo:hi], vals[lo:hi],
+                width=1.0, color="orangered", alpha=0.9, edgecolor="none",
+            )
+
+    r, c = int(pos[0]), int(pos[1])
+    ax.set_title(f"{title_prefix} (r,c)=({r},{c})", pad=4)
+    ax.set_xlabel("bin", labelpad=3)
+    ax.set_ylabel("补偿值", labelpad=3)
+    ax.grid(alpha=0.25, linestyle="--", axis="y")
+    ax.set_xlim(-0.5, n - 0.5)
+    if annotation:
+        ax.text(
+            0.98, 0.98, annotation,
+            transform=ax.transAxes,
+            va="top", ha="right",
+        )
 
 
 def _fig_to_rgb_image(fig: Any) -> np.ndarray:
@@ -537,10 +597,13 @@ def _render_visual_left(
     normal: np.ndarray,
     brightness_map: np.ndarray,
     bin0_per_pixel: np.ndarray,
-    noise_block: np.ndarray,
+    noise_per_pixel: np.ndarray,
+    comp_cube: np.ndarray,
+    crosstalk_top2: list[tuple[int, int]],
+    noise_top2: list[tuple[int, int]],
     target_size: tuple[int, int],
 ) -> np.ndarray:
-    """渲染 2x4 拼接图（BGR）。
+    """渲染 3x4 拼接图（BGR）。
 
     figure 直接按 ``target_size = (target_w, target_h)`` 像素绘制,
     后续不再做 ``cv2.resize`` 缩放,所以字体/坐标轴不会被二次拉伸,
@@ -555,6 +618,10 @@ def _render_visual_left(
     | (2,1) 亮度  | (2,2) 串光  | (2,3) 底噪  | (2,4) 3D    |
     |     2D 图   |     2D 图   |     2D 图   |     点云    |
     +-------------+-------------+-------------+-------------+
+    | (3,1) 串光  | (3,2) 串光  | (3,3) 底噪  | (3,4) 底噪  |
+    |  最差像素#1 |  最差像素#2 |  最大像素#1 |  最大像素#2 |
+    |   bin[0:62] |   bin[0:62] |   bin[0:62] |   bin[0:62] |
+    +-------------+-------------+-------------+-------------+
     """
     target_w, target_h = int(target_size[0]), int(target_size[1])
     target_w = max(target_w, 1)
@@ -567,25 +634,64 @@ def _render_visual_left(
             figsize=(target_w / _VISUAL_DPI, target_h / _VISUAL_DPI),
             dpi=_VISUAL_DPI * _VISUAL_OVERSAMPLE,
         )
-        # 直方图信息密度低,2D / 3D 图细节更多,让第二行更高,3D 点云
-        # 的可视区显著扩大,不再"小家子气"。
-        gs = fig.add_gridspec(2, 4, height_ratios=[0.85, 1.15])
+        # 第二行 (2D / 3D) 细节最多,留最大;第一/三行直方图信息密度低,稍短。
+        gs = fig.add_gridspec(3, 4, height_ratios=[0.95, 1.20, 0.90])
 
         # row 1 — 直方图
         _draw_brightness_hist(fig.add_subplot(gs[0, 0]), brightness_map)
         _draw_crosstalk_hist(fig.add_subplot(gs[0, 1]),  bin0_per_pixel)
-        _draw_noise_hist(fig.add_subplot(gs[0, 2]),      noise_block)
+        _draw_noise_hist(fig.add_subplot(gs[0, 2]),      noise_per_pixel)
         _draw_parallelism_hist(fig.add_subplot(gs[0, 3]), residuals_m)
 
         # row 2 — 2D / 3D 图
         _draw_brightness_image(fig.add_subplot(gs[1, 0]), brightness_map)
         _draw_crosstalk_image(fig.add_subplot(gs[1, 1]),  bin0_per_pixel)
-        _draw_noise_image(fig.add_subplot(gs[1, 2]),      noise_block)
+        _draw_noise_image(fig.add_subplot(gs[1, 2]),      noise_per_pixel)
         ax_3d = fig.add_subplot(gs[1, 3], projection="3d")
         _draw_3d_plot(ax_3d, points, residuals_m, normal)
 
+        # row 3 — 串光 / 底噪 最差像素的 bin[0:62] 直方图
+        # (3,1)/(3,2): 串光 top-2 (高亮 bin[0],右上角标这个像素的串光值)
+        # (3,3)/(3,4): 底噪 top-2 (高亮 bin[NOISE_LO:NOISE_HI],右上角标底噪值)
+        row3_slots: list[dict[str, Any] | None] = []
+        for i in range(2):
+            if i < len(crosstalk_top2):
+                r, c = crosstalk_top2[i]
+                row3_slots.append({
+                    "pos":        (r, c),
+                    "title":      f"串光最差 #{i + 1}",
+                    "highlight":  (0, 1),
+                    "annotation": f"串光 = {float(bin0_per_pixel[r, c]):.1f}",
+                })
+            else:
+                row3_slots.append(None)
+        for i in range(2):
+            if i < len(noise_top2):
+                r, c = noise_top2[i]
+                row3_slots.append({
+                    "pos":        (r, c),
+                    "title":      f"底噪最大 #{i + 1}",
+                    "highlight":  (NOISE_BIN_LO, NOISE_BIN_HI),
+                    "annotation": f"底噪 = {float(noise_per_pixel[r, c]):.2f}",
+                })
+            else:
+                row3_slots.append(None)
+
+        for col, spec in enumerate(row3_slots):
+            ax = fig.add_subplot(gs[2, col])
+            if spec is None:
+                ax.axis("off")
+                continue
+            r, c = spec["pos"]
+            _draw_pixel_bin_hist(
+                ax, comp_cube[r, c, :], (r, c),
+                spec["title"],
+                highlight_range=spec["highlight"],
+                annotation=spec["annotation"],
+            )
+
         # 子图间距收紧,让格子之间的留白尽量小,作图区相对更大。
-        fig.tight_layout(pad=0.3, w_pad=0.2, h_pad=0.2)
+        fig.tight_layout(pad=0.3, w_pad=0.2, h_pad=0.4)
         rgb = _fig_to_rgb_image(fig)
         plt.close(fig)
 
@@ -858,6 +964,10 @@ _PANEL_SEP_WIDTH = 2
 _LEFT_WIDTH = _OUTPUT_WIDTH - _PANEL_WIDTH - _PANEL_SEP_WIDTH
 _HEADER_HEIGHT = 50
 
+# 左侧 figure(不含 header)的最小像素高度。3x4 布局一行 ~270px 即可清晰,
+# 整体看起来更扁更协调;panel 比此短时下方补暗灰背景,长则左侧补黑。
+_MIN_LEFT_BODY_H = 820
+
 
 def _compose_combined_image(
     visual_left_bgr: np.ndarray,
@@ -867,32 +977,35 @@ def _compose_combined_image(
 
     入参约定:
       - ``visual_left_bgr.shape[1] == _LEFT_WIDTH``
-      - ``visual_left_bgr.shape[0] == panel.shape[0] - _HEADER_HEIGHT``
       - ``panel.shape[1] == _PANEL_WIDTH``
 
-    满足以上约定后这里就是 ``vstack(header, body) | sep | panel`` 的纯拼接,
-    完全不做任何 ``cv2.resize``,所以左侧 plot 字体不会被二次缩放。
+    左侧总高 = ``_HEADER_HEIGHT + visual_left_bgr.shape[0]``。
+    左右两侧高度不一致时,短的一边补背景:左侧补黑、panel 补 panel 的暗灰底色,
+    保证最终图无黑边、左右严格对齐。
     """
-    panel_h = int(panel.shape[0])
     target_w = _LEFT_WIDTH
 
     header = np.zeros((_HEADER_HEIGHT, target_w, 3), dtype=np.uint8)
     _put_text(
         header,
-        "ToF 标定可视化(亮度 / 串光 / 底噪 / 平行度 直方图 + 亮度 / 串光 / 底噪 2D + 3D 点云)",
+        "ToF 标定可视化(直方图 + 2D 图 + 3D 点云 + 串光/底噪最差像素 bin[0:62])",
         (12, 34), (255, 255, 255), size=22, bold=True,
     )
     left = np.vstack([header, visual_left_bgr])
 
-    # 兜底:理论上 left.shape[0] == panel_h,如有 1~2 行误差再最近邻对齐。
-    if left.shape[0] != panel_h:
-        if left.shape[0] < panel_h:
-            pad = np.zeros((panel_h - left.shape[0], target_w, 3), dtype=np.uint8)
-            left = np.vstack([left, pad])
-        else:
-            left = left[:panel_h]
+    left_h = int(left.shape[0])
+    panel_h = int(panel.shape[0])
+    out_h = max(left_h, panel_h)
 
-    sep = np.full((panel_h, _PANEL_SEP_WIDTH, 3), 70, dtype=np.uint8)
+    if left_h < out_h:
+        pad = np.zeros((out_h - left_h, target_w, 3), dtype=np.uint8)
+        left = np.vstack([left, pad])
+    if panel_h < out_h:
+        # 用 panel 的暗灰底色 (24,24,24) 向下延展,看起来是 panel 自然结束的留白。
+        pad = np.full((out_h - panel_h, _PANEL_WIDTH, 3), 24, dtype=np.uint8)
+        panel = np.vstack([panel, pad])
+
+    sep = np.full((out_h, _PANEL_SEP_WIDTH, 3), 70, dtype=np.uint8)
     return np.hstack([left, sep, panel])
 
 
@@ -962,10 +1075,13 @@ def _calibrate(tof_cube: np.ndarray) -> dict[str, Any]:
         "points":         pts_opt,
         "normal":         normal,
         # peak_per_pixel 既是亮度图,也是打光强度的源头。
-        "brightness_map": extra["peak_per_pixel"],
-        "bin0_per_pixel": extra["bin0_per_pixel"],
-        "noise_block":    extra["noise_block"],
-        "dead_mask":      extra["dead_mask"],
+        "brightness_map":  extra["peak_per_pixel"],
+        "bin0_per_pixel":  extra["bin0_per_pixel"],
+        "noise_per_pixel": extra["noise_per_pixel"],
+        "dead_mask":       extra["dead_mask"],
+        "comp_cube":       extra["comp_cube"],
+        "crosstalk_top2":  extra["crosstalk_top2"],
+        "noise_top2":      extra["noise_top2"],
     }
 
 
@@ -986,9 +1102,11 @@ def run_all_checks(tof_raw_path: str) -> tuple[bool, np.ndarray, list[float]]:
         passed : bool
             所有 metric 同时落在阈值范围内。
         image : numpy.ndarray
-            BGR 图像，左侧为 2x4 标定可视化：
+            BGR 图像，左侧为 3x4 标定可视化：
             行 1 = 亮度 / 串光 / 底噪 / 平行度 四张直方图，
-            行 2 = 亮度 2D / 串光 2D / 底噪 2D / 3D 点云 + 拟合平面；
+            行 2 = 亮度 2D / 串光 2D / 底噪 2D / 3D 点云 + 拟合平面，
+            行 3 = 串光最差 #1 / #2、底噪最大 #1 / #2 各像素的 bin[0:62]
+                  补偿后柱状图(关注区段橙红高亮);
             右侧为产测项目面板，按"坏点 / 串光 / 底噪 / 打光 / 几何
             标定 / FPPN / 平面度"分组,每一项都列出 measured / threshold /
             状态。
@@ -1022,12 +1140,15 @@ def run_all_checks(tof_raw_path: str) -> tuple[bool, np.ndarray, list[float]]:
 
     # 先把右侧 panel 画出来,以它的高度为基准决定左侧 figure 的目标像素,
     # 让左侧从一开始就按"最终像素尺寸"渲染,避免事后 resize 把字体压糊。
+    # 3x4 布局每行需要约 300 px 才不挤,所以左侧 body 设了最小高度;若 panel
+    # 比左侧短,_compose_combined_image 会在 panel 底部补一段暗灰留白。
     panel = _draw_test_panel(sections, overall_pass, _PANEL_WIDTH)
-    target_body_h = max(int(panel.shape[0]) - _HEADER_HEIGHT, 1)
+    target_body_h = max(int(panel.shape[0]) - _HEADER_HEIGHT, _MIN_LEFT_BODY_H)
 
     visual_left_bgr = _render_visual_left(
         cali["residuals"], cali["points"], cali["normal"],
-        cali["brightness_map"], cali["bin0_per_pixel"], cali["noise_block"],
+        cali["brightness_map"], cali["bin0_per_pixel"], cali["noise_per_pixel"],
+        cali["comp_cube"], cali["crosstalk_top2"], cali["noise_top2"],
         target_size=(_LEFT_WIDTH, target_body_h),
     )
     image = _compose_combined_image(visual_left_bgr, panel)

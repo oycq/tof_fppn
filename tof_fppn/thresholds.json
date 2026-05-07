@@ -1,11 +1,21 @@
 {
-  "f":         { "min": 50.0,  "max": 59.0   },
-  "bias":      { "min": -35.0, "max": 5.0    },
-  "ax":        { "min": -5.0,  "max": 5.0    },
-  "ay":        { "min": -5.0,  "max": 5.0    },
-  "rms":       { "min": 0.0,   "max": 3.0    },
-  "worst":     { "min": 0.0,   "max": 6.0    },
-  "peak_mean": { "min": 500.0, "max": 3000.0 },
-  "peak_max":  { "min": 800.0, "max": 6000.0 },
-  "peak_min":  { "min": 50.0,  "max": 600.0  }
+  "dead_pixels":    { "max": 0       },
+
+  "crosstalk_max":  { "max": 1000.0  },
+  "crosstalk_mean": { "max": 300.0   },
+
+  "noise_max":      { "max": 500.0   },
+  "noise_mean":     { "max": 30.0    },
+
+  "light_max":      { "min": 800.0   },
+  "light_mean":     { "min": 500.0   },
+
+  "f":              { "min": 50.0,  "max": 59.0  },
+  "ax":             { "min": -5.0,  "max": 5.0   },
+  "ay":             { "min": -5.0,  "max": 5.0   },
+
+  "bias":           { "min": -35.0, "max": 5.0   },
+
+  "rms":            { "max": 3.0    },
+  "worst":          { "max": 6.0    }
 }

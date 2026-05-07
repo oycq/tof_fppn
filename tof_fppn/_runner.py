@@ -73,8 +73,13 @@ SAT_HIGH_BIN_WEIGHT = 1024.0
 VISUAL_RES_SCALE = 2.0
 
 _METRIC_NAMES: tuple[str, ...] = (
-    "f", "bias", "ax", "ay", "rms", "worst",
-    "peak_mean", "peak_max", "peak_min",
+    "f", "ax", "ay",
+    "bias",
+    "rms", "worst",
+    "dead_pixels",
+    "crosstalk_max", "crosstalk_mean",
+    "noise_max", "noise_mean",
+    "light_max", "light_mean",
 )
 
 
@@ -126,6 +131,67 @@ def _compute_peak_brightness(tof_cube: np.ndarray) -> np.ndarray:
     denom = h[:, :, 62] * SAT_HIGH_BIN_WEIGHT + h[:, :, 63]
     sat_coeff = np.where(denom > 1e-12, SAT_SCALE / denom, 0.0)
     return peak_first_62 * sat_coeff
+
+
+def _compute_compensated_cube(tof_cube: np.ndarray) -> np.ndarray:
+    """对前 62 个 bin 做最后两个 bin 的饱和补偿,返回 (H, W, 62) float64。
+
+    校正公式与 _compute_peak_brightness 一致：
+        bin_corr[i, j, k] = bin[i, j, k] * SAT_SCALE / (bin[i,j,62]*1024 + bin[i,j,63])
+    分母为 0 时整像素的补偿值置 0（与原始即为 0 等价,不影响后续判定）。
+    """
+    h = np.asarray(tof_cube, dtype=np.float64)
+    denom = h[:, :, 62] * SAT_HIGH_BIN_WEIGHT + h[:, :, 63]
+    sat_coeff = np.where(denom > 1e-12, SAT_SCALE / denom, 0.0)
+    return h[:, :, :TOF_HIST_VALID_BINS] * sat_coeff[:, :, None]
+
+
+# 串光统计窗口固定为 bin[0]；底噪窗口按用户口径取 bin[30:50]。
+NOISE_BIN_LO = 30
+NOISE_BIN_HI = 50  # 不含
+
+
+def _compute_extra_metrics(tof_cube: np.ndarray) -> dict[str, Any]:
+    """从 raw cube 抽出新增的 7 个产测量。
+
+    所有 max / mean 类指标都基于 *补偿后* 的 hist。
+    返回 dict 同时携带绘图所需的中间产物。
+    """
+    h = np.asarray(tof_cube, dtype=np.float64)
+    raw62 = h[:, :, :TOF_HIST_VALID_BINS]
+
+    # 坏点：前 62 bin 全为 0 的像素（用原始值判断,补偿前后等价）。
+    dead_mask = np.all(raw62 == 0.0, axis=2)
+    dead_count = int(np.sum(dead_mask))
+
+    comp = _compute_compensated_cube(tof_cube)
+
+    bin0 = comp[:, :, 0]
+    crosstalk_max = float(np.max(bin0)) if bin0.size else 0.0
+    crosstalk_mean = float(np.mean(bin0)) if bin0.size else 0.0
+
+    noise_block = comp[:, :, NOISE_BIN_LO:NOISE_BIN_HI]
+    noise_max = float(np.max(noise_block)) if noise_block.size else 0.0
+    noise_mean = float(np.mean(noise_block)) if noise_block.size else 0.0
+
+    peak_per_pixel = np.max(comp, axis=2) if comp.size else np.zeros((IMG_H, IMG_W))
+    light_max = float(np.max(peak_per_pixel)) if peak_per_pixel.size else 0.0
+    light_mean = float(np.mean(peak_per_pixel)) if peak_per_pixel.size else 0.0
+
+    return {
+        "values": {
+            "dead_pixels":    dead_count,
+            "crosstalk_max":  crosstalk_max,
+            "crosstalk_mean": crosstalk_mean,
+            "noise_max":      noise_max,
+            "noise_mean":     noise_mean,
+            "light_max":      light_max,
+            "light_mean":     light_mean,
+        },
+        "bin0_per_pixel":  bin0,
+        "peak_per_pixel":  peak_per_pixel,
+        "dead_mask":       dead_mask,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +347,31 @@ def _draw_brightness_hist(ax: Any, brightness_map: np.ndarray) -> None:
     )
 
 
+def _draw_crosstalk_hist(ax: Any, bin0_per_pixel: np.ndarray) -> None:
+    """串光直方图：所有像素的 bin[0] 补偿值分布。"""
+    vals = np.asarray(bin0_per_pixel, dtype=np.float64).reshape(-1)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return
+
+    ax.hist(vals, bins=30, color=_HIST_COLOR, edgecolor="white", alpha=0.9)
+    ax.set_title("串光分布 (bin[0])", pad=14)
+    ax.set_xlabel("bin[0] 补偿值", labelpad=10)
+    ax.set_ylabel("数量", labelpad=10)
+    ax.grid(alpha=0.25, linestyle="--")
+    mean_v = float(vals.mean())
+    max_v = float(vals.max())
+    ratio = max_v / mean_v if mean_v > 1e-12 else float("nan")
+    ax.text(
+        0.02, 0.98,
+        f"均值 = {mean_v:.1f}\n"
+        f"最大 = {max_v:.1f}\n"
+        f"max/mean = {ratio:.2f}",
+        transform=ax.transAxes,
+        va="top", ha="left",
+    )
+
+
 def _draw_center_pixel_hist(ax: Any, tof_cube: np.ndarray) -> None:
     """画 ToF 中心像素前 62 个 bin 的直方图。"""
     cy = IMG_H // 2
@@ -399,6 +490,7 @@ def _render_visual_left(
     points: np.ndarray,
     normal: np.ndarray,
     brightness_map: np.ndarray,
+    bin0_per_pixel: np.ndarray,
     tof_cube: np.ndarray,
 ) -> np.ndarray:
     """渲染 2x3 拼接图（BGR）：
@@ -406,7 +498,7 @@ def _render_visual_left(
     +---------------------+----------------------+----------------------+
     | (1,1) 亮度直方图     | (1,2) 误差直方图      | (1,3) 中心像素 62-bin |
     +---------------------+----------------------+----------------------+
-    | (2,1) 亮度矩阵图     | (2,2) 误差矩阵图      | (2,3) 3D 点云 + 平面  |
+    | (2,1) 亮度矩阵图     | (2,2) 串光直方图      | (2,3) 3D 点云 + 平面  |
     +---------------------+----------------------+----------------------+
     """
     with plt.rc_context(_PLOT_RC):
@@ -424,8 +516,8 @@ def _render_visual_left(
         ax_bimg = fig.add_subplot(2, 3, 4)
         _draw_brightness_image(ax_bimg, brightness_map)
 
-        ax_resid = fig.add_subplot(2, 3, 5)
-        _draw_residual_image(ax_resid, residuals_m)
+        ax_xtalk = fig.add_subplot(2, 3, 5)
+        _draw_crosstalk_hist(ax_xtalk, bin0_per_pixel)
 
         ax_3d = fig.add_subplot(2, 3, 6, projection="3d")
         _draw_3d_plot(ax_3d, points, residuals_m, normal)
@@ -440,12 +532,41 @@ def _render_visual_left(
 # ---------------------------------------------------------------------------
 # 阈值检查
 # ---------------------------------------------------------------------------
-def _metric_in_range(value: float, cfg: dict[str, float]) -> tuple[bool, float, float]:
-    if "min" not in cfg or "max" not in cfg:
-        raise ValueError("threshold config must contain both 'min' and 'max'")
-    min_v = float(cfg["min"])
-    max_v = float(cfg["max"])
-    return (min_v <= value <= max_v), min_v, max_v
+def _metric_in_range(
+    value: float, cfg: dict[str, float]
+) -> tuple[bool, float | None, float | None]:
+    """支持三种阈值形式：
+
+    - ``{"max": X}``           → 仅上限,要求 ``value <= X``
+    - ``{"min": Y}``           → 仅下限,要求 ``value >= Y``
+    - ``{"min": Y, "max": X}`` → 区间,要求 ``Y <= value <= X``
+
+    返回 ``(passed, min_v_or_None, max_v_or_None)``,便于上层按需展示。
+    """
+    has_min = "min" in cfg
+    has_max = "max" in cfg
+    if not has_min and not has_max:
+        raise ValueError("threshold config must contain at least one of 'min' / 'max'")
+
+    min_v = float(cfg["min"]) if has_min else None
+    max_v = float(cfg["max"]) if has_max else None
+
+    ok = True
+    if min_v is not None and value < min_v:
+        ok = False
+    if max_v is not None and value > max_v:
+        ok = False
+    return ok, min_v, max_v
+
+
+def _format_threshold(min_v: float | None, max_v: float | None, fmt: str) -> str:
+    if min_v is not None and max_v is not None:
+        return f"[{fmt.format(min_v)}, {fmt.format(max_v)}]"
+    if max_v is not None:
+        return f"<= {fmt.format(max_v)}"
+    if min_v is not None:
+        return f">= {fmt.format(min_v)}"
+    return "-"
 
 
 def _mk_item(name: str, status: str, measured: str, threshold: str, note: str = "") -> dict[str, str]:
@@ -460,21 +581,29 @@ def _mk_item(name: str, status: str, measured: str, threshold: str, note: str = 
 
 _METRIC_DISPLAY: dict[str, tuple[str, str, str]] = {
     # name -> (中文名, 单位, 数值格式)
-    "f":         ("焦距 f",        "px",  "{:.3f}"),
-    "bias":      ("距离偏置 bias", "cm",  "{:+.2f}"),
-    "ax":        ("X 倾角 ax",     "deg", "{:+.3f}"),
-    "ay":        ("Y 倾角 ay",     "deg", "{:+.3f}"),
-    "rms":       ("RMS 误差",      "cm",  "{:.3f}"),
-    "worst":     ("最坏 1% 误差",  "cm",  "{:.3f}"),
-    "peak_mean": ("亮度均值",      "",    "{:.1f}"),
-    "peak_max":  ("亮度最大值",    "",    "{:.1f}"),
-    "peak_min":  ("亮度最小值",    "",    "{:.1f}"),
+    "f":              ("焦距 f",        "px",  "{:.3f}"),
+    "bias":           ("FPPN 偏置",     "cm",  "{:+.2f}"),
+    "ax":             ("X 倾角 ax",     "deg", "{:+.3f}"),
+    "ay":             ("Y 倾角 ay",     "deg", "{:+.3f}"),
+    "rms":            ("均值 (RMS)",    "cm",  "{:.3f}"),
+    "worst":          ("最大 (1%)",     "cm",  "{:.3f}"),
+    "dead_pixels":    ("坏点数量",      "",    "{:.0f}"),
+    "crosstalk_max":  ("最大值",        "",    "{:.1f}"),
+    "crosstalk_mean": ("均值",          "",    "{:.1f}"),
+    "noise_max":      ("最大值",        "",    "{:.1f}"),
+    "noise_mean":     ("均值",          "",    "{:.1f}"),
+    "light_max":      ("最大值",        "",    "{:.1f}"),
+    "light_mean":     ("均值",          "",    "{:.1f}"),
 }
 
 _SECTIONS_LAYOUT: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("几何标定", ("f", "bias", "ax", "ay")),
-    ("平面误差", ("rms", "worst")),
-    ("光度统计", ("peak_mean", "peak_max", "peak_min")),
+    ("坏点检测",   ("dead_pixels",)),
+    ("串光检测",   ("crosstalk_max", "crosstalk_mean")),
+    ("底噪检测",   ("noise_max", "noise_mean")),
+    ("打光强度",   ("light_max", "light_mean")),
+    ("几何标定",   ("f", "ax", "ay")),
+    ("FPPN 检测", ("bias",)),
+    ("平面度",     ("rms", "worst")),
 )
 
 
@@ -492,7 +621,7 @@ def _build_sections(values: dict[str, float]) -> tuple[list[tuple[str, list[dict
             ok, lo, hi = _metric_in_range(value, cfg)
             cn_name, unit, fmt = _METRIC_DISPLAY.get(name, (name, "", "{:.4f}"))
             measured = fmt.format(value) + (f" {unit}" if unit else "")
-            threshold = f"[{fmt.format(lo)}, {fmt.format(hi)}]"
+            threshold = _format_threshold(lo, hi, fmt)
             note = "" if ok else "超出范围"
             items.append(_mk_item(cn_name, "PASS" if ok else "FAIL", measured, threshold, note))
             if not ok:
@@ -585,10 +714,13 @@ def _draw_test_panel(
     section_gap = 10
     bottom_pad = 16
 
+    # 与下方 y 累加同步：起点 title_h + section_gap，
+    # 每个 section 头占 section_head_h + 4，section 末尾再 += section_gap，
+    # 每个 item 行占 line_h。
     n_items = sum(len(its) for _, its in sections)
     panel_h = (
-        title_h
-        + len(sections) * (section_head_h + section_gap)
+        title_h + section_gap
+        + len(sections) * (section_head_h + 4 + section_gap)
         + n_items * line_h
         + bottom_pad
     )
@@ -669,7 +801,7 @@ def _compose_combined_image(
     header = np.zeros((_HEADER_HEIGHT, target_w, 3), dtype=np.uint8)
     _put_text(
         header,
-        "ToF 标定可视化（亮度分布 / 误差分布 / 中心像素 hist / 亮度图 / 残差图 / 3D 点云）",
+        "ToF 标定可视化（亮度分布 / 误差分布 / 中心像素 hist / 亮度图 / 串光分布 / 3D 点云）",
         (12, 34), (255, 255, 255), size=22, bold=True,
     )
     left = np.vstack([header, body])
@@ -693,7 +825,7 @@ def _compose_combined_image(
 # ---------------------------------------------------------------------------
 def _calibrate(tof_cube: np.ndarray) -> dict[str, Any]:
     depth_map = _depth_from_hist_centroid(tof_cube)
-    peak_brightness = _compute_peak_brightness(tof_cube)
+    extra = _compute_extra_metrics(tof_cube)
     bias_fixed = _compute_bias_from_depth(depth_map, PLANE_DISTANCE_M)
     depth_flat = depth_map.reshape(-1)
     u_flat, v_flat = _build_roi_uv()
@@ -737,29 +869,26 @@ def _calibrate(tof_cube: np.ndarray) -> dict[str, Any]:
         np.partition(abs_err, abs_err.size - worst_k)[abs_err.size - worst_k]
     )
 
-    pb_flat = np.asarray(peak_brightness, dtype=np.float64).reshape(-1)
-    pb_flat = pb_flat[np.isfinite(pb_flat)]
-    pb_mean = float(np.mean(pb_flat)) if pb_flat.size > 0 else 0.0
-    pb_max = float(np.max(pb_flat)) if pb_flat.size > 0 else 0.0
-    pb_min = float(np.min(pb_flat)) if pb_flat.size > 0 else 0.0
+    # 误差 / 偏置统一以 cm 对外暴露；其余产测项见 _compute_extra_metrics。
+    values: dict[str, float] = {
+        "f":     f,
+        "bias":  bias * 100.0,
+        "ax":    ax_deg,
+        "ay":    ay_deg,
+        "rms":   rms_m * 100.0,
+        "worst": worst_top_threshold_m * 100.0,
+    }
+    values.update(extra["values"])
 
-    # 误差 / 偏置统一以 cm 对外暴露。
     return {
-        "values": {
-            "f": f,
-            "bias": bias * 100.0,
-            "ax": ax_deg,
-            "ay": ay_deg,
-            "rms": rms_m * 100.0,
-            "worst": worst_top_threshold_m * 100.0,
-            "peak_mean": pb_mean,
-            "peak_max": pb_max,
-            "peak_min": pb_min,
-        },
-        "residuals": r_opt,
-        "points": pts_opt,
-        "normal": normal,
-        "brightness_map": np.asarray(peak_brightness, dtype=np.float64),
+        "values":         values,
+        "residuals":      r_opt,
+        "points":         pts_opt,
+        "normal":         normal,
+        # peak_per_pixel 既是亮度图,也是打光强度的源头。
+        "brightness_map": extra["peak_per_pixel"],
+        "bin0_per_pixel": extra["bin0_per_pixel"],
+        "dead_mask":      extra["dead_mask"],
     }
 
 
@@ -782,13 +911,21 @@ def run_all_checks(tof_raw_path: str) -> tuple[bool, np.ndarray, list[float]]:
         image : numpy.ndarray
             BGR 图像，左侧为 2x3 标定可视化：
             行 1 为三个直方图（亮度分布 / 误差分布 / 中心像素 62-bin），
-            行 2 为亮度矩阵图 / 残差矩阵图 / 3D 点云 + 拟合平面；
-            右侧为产测项目面板（按"几何标定 / 平面误差 / 光度统计"分组，
-            每一项都列出 measured / threshold / 状态）。
+            行 2 为亮度矩阵图 / 串光直方图 / 3D 点云 + 拟合平面；
+            右侧为产测项目面板，按"几何标定 / FPPN 检测 / 平面度 /
+            坏点检测 / 串光检测 / 底噪检测 / 打光强度"分组，每一项
+            都列出 measured / threshold / 状态。
         params : list[float]
-            9 个 metric 数值，顺序固定为
-            ``[f(px), bias(cm), ax(deg), ay(deg),
-               rms(cm), worst(cm), peak_mean, peak_max, peak_min]``。
+            13 个 metric 数值,顺序固定为：
+            ``[f(px), ax(deg), ay(deg),
+               bias(cm),
+               rms(cm), worst(cm),
+               dead_pixels,
+               crosstalk_max, crosstalk_mean,
+               noise_max, noise_mean,
+               light_max, light_mean]``。
+            其中除几何/平面项之外的 max/mean 都是基于 *最后两个 bin
+            饱和补偿后* 的 hist 值。
     """
     original_cwd = os.getcwd()
     abs_raw_path = (
@@ -808,7 +945,7 @@ def run_all_checks(tof_raw_path: str) -> tuple[bool, np.ndarray, list[float]]:
 
     visual_left_bgr = _render_visual_left(
         cali["residuals"], cali["points"], cali["normal"],
-        cali["brightness_map"], tof_cube,
+        cali["brightness_map"], cali["bin0_per_pixel"], tof_cube,
     )
     image = _compose_combined_image(visual_left_bgr, sections, overall_pass)
 

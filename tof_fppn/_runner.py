@@ -601,6 +601,68 @@ _PLOT_RC = {
 _CBAR_TICK_FONTSIZE = 7
 
 
+# 3x4 布局的列主题：列顶 banner / 子图 spine / 子图 title 都用这个色。
+# 颜色刻意避开 hist 主色 'steelblue' 和高亮色 'orangered',让装饰与数据互不干扰;
+# 四个色相区分明显,饱和度统一中等,视觉上像四张并排的卡片。
+_COL_THEMES: tuple[tuple[str, str], ...] = (
+    ("打光强度", "#4a90e2"),  # 钢蓝
+    ("串光",     "#e08a3c"),  # 琥珀
+    ("底噪",     "#8e44ad"),  # 紫
+    ("平面度",   "#27ae60"),  # 森绿
+)
+
+
+def _decorate_columns(
+    fig: Any,
+    col_axes: list[list[Any]],
+    themes: tuple[tuple[str, str], ...] = _COL_THEMES,
+) -> None:
+    """给每列加顶部色带 + 列名 banner,并把列内子图的 spines/title 染成主题色。
+
+    必须在 ``fig.tight_layout(rect=[0, 0, 1, top])`` 之后调用,
+    这样 axes 都被压在 ``top`` 以下,banner 的 y 区间就用 ``[top, 1.0]``。
+    3D axes 没有标准 spines,这里用 try/except 兼容跳过。
+    """
+    from matplotlib.patches import Rectangle
+
+    banner_top = 0.995
+    banner_h = 0.012
+    banner_y = banner_top - banner_h
+
+    for col_idx, (name, color) in enumerate(themes):
+        axes_in_col = [a for a in col_axes[col_idx] if a is not None]
+        if not axes_in_col:
+            continue
+
+        positions = [a.get_position() for a in axes_in_col]
+        x0 = min(p.x0 for p in positions)
+        x1 = max(p.x1 for p in positions)
+
+        # 顶部色带 (figure 坐标),作为整列的 "卡片头"。
+        fig.add_artist(Rectangle(
+            (x0, banner_y), x1 - x0, banner_h,
+            facecolor=color, edgecolor="none",
+            transform=fig.transFigure, zorder=5,
+        ))
+        # 列名标题,放在色带正下方,避免占太多顶部空间。
+        fig.text(
+            (x0 + x1) / 2.0, banner_y - 0.005,
+            name,
+            ha="center", va="top",
+            fontsize=12, fontweight="bold", color=color,
+            transform=fig.transFigure,
+        )
+
+        # 子图 spine 染成主题色作为列分组提示;标题/刻度保持黑色,保证可读性。
+        for a in axes_in_col:
+            try:
+                for spine in a.spines.values():
+                    spine.set_edgecolor(color)
+                    spine.set_linewidth(1.0)
+            except Exception:
+                pass
+
+
 def _render_visual_left(
     residuals_m: np.ndarray,
     points: np.ndarray,
@@ -649,18 +711,22 @@ def _render_visual_left(
         # 第二行 (2D / 3D) 细节最多,留最大;第一/三行直方图信息密度低,稍短。
         gs = fig.add_gridspec(3, 4, height_ratios=[0.95, 1.20, 0.90])
 
+        # 收集每列 3 个 axes,渲染完后统一上主题色 + 顶端色带 banner。
+        col_axes: list[list[Any]] = [[], [], [], []]
+
         # row 1 — 直方图
-        _draw_brightness_hist(fig.add_subplot(gs[0, 0]), brightness_map)
-        _draw_crosstalk_hist(fig.add_subplot(gs[0, 1]),  bin0_per_pixel)
-        _draw_noise_hist(fig.add_subplot(gs[0, 2]),      noise_per_pixel)
-        _draw_parallelism_hist(fig.add_subplot(gs[0, 3]), residuals_m)
+        ax = fig.add_subplot(gs[0, 0]); _draw_brightness_hist(ax, brightness_map);  col_axes[0].append(ax)
+        ax = fig.add_subplot(gs[0, 1]); _draw_crosstalk_hist(ax, bin0_per_pixel);   col_axes[1].append(ax)
+        ax = fig.add_subplot(gs[0, 2]); _draw_noise_hist(ax, noise_per_pixel);      col_axes[2].append(ax)
+        ax = fig.add_subplot(gs[0, 3]); _draw_parallelism_hist(ax, residuals_m);    col_axes[3].append(ax)
 
         # row 2 — 2D / 3D 图
-        _draw_brightness_image(fig.add_subplot(gs[1, 0]), brightness_map)
-        _draw_crosstalk_image(fig.add_subplot(gs[1, 1]),  bin0_per_pixel)
-        _draw_noise_image(fig.add_subplot(gs[1, 2]),      noise_per_pixel)
+        ax = fig.add_subplot(gs[1, 0]); _draw_brightness_image(ax, brightness_map); col_axes[0].append(ax)
+        ax = fig.add_subplot(gs[1, 1]); _draw_crosstalk_image(ax, bin0_per_pixel);  col_axes[1].append(ax)
+        ax = fig.add_subplot(gs[1, 2]); _draw_noise_image(ax, noise_per_pixel);     col_axes[2].append(ax)
         ax_3d = fig.add_subplot(gs[1, 3], projection="3d")
         _draw_3d_plot(ax_3d, points, residuals_m, normal)
+        col_axes[3].append(ax_3d)
 
         # row 3 — 四个有代表性的单像素 bin[0:62] 直方图
         # (3,1)        最暗像素 (peak_per_pixel 最小,看打光是否偏弱)
@@ -714,6 +780,7 @@ def _render_visual_left(
 
         for col, spec in enumerate(row3_slots):
             ax = fig.add_subplot(gs[2, col])
+            col_axes[col].append(ax)
             if spec is None:
                 ax.axis("off")
                 continue
@@ -726,7 +793,10 @@ def _render_visual_left(
             )
 
         # 子图间距收紧,让格子之间的留白尽量小,作图区相对更大。
-        fig.tight_layout(pad=0.3, w_pad=0.2, h_pad=0.4)
+        # rect 顶端留 ~5% 给列 banner 色带 + 列名,所有子图都被压在 0.95 以下。
+        fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.95], pad=0.3, w_pad=0.2, h_pad=0.4)
+        _decorate_columns(fig, col_axes)
+
         rgb = _fig_to_rgb_image(fig)
         plt.close(fig)
 

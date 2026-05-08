@@ -36,14 +36,14 @@ from tof_fppn import run_all_checks
 passed, image, params = run_all_checks("tof_60cm.raw")
 # passed : bool
 # image  : np.ndarray (H, W, 3) BGR，可直接 cv2.imshow / cv2.imwrite
-# params : list[float] 长度 13，顺序固定为：
+# params : list[float] 长度 14，顺序固定为：
 #   [f(px), ax(deg), ay(deg),
 #    bias(cm),
 #    rms(cm), worst(cm),
 #    dead_pixels,
 #    crosstalk_max, crosstalk_mean,
 #    noise_max, noise_mean,
-#    light_max, light_mean]
+#    light_max, light_mean, light_min]
 ```
 
 * `tof.raw` 路径相对调用时的 cwd，绝对路径也可以。
@@ -74,6 +74,7 @@ passed, image, params = run_all_checks("tof_60cm.raw")
 
   "light_max":      { "min": 800.0  },
   "light_mean":     { "min": 500.0  },
+  "light_min":      { "min": 200.0  },
 
   "f":              { "min": 50.0,  "max": 59.0 },
   "ax":             { "min": -5.0,  "max": 5.0  },
@@ -111,6 +112,6 @@ bin_corr[k] = bin[k] * 50000 / (bin[62] * 1024 + bin[63])
 | 坏点检测 | `dead_pixels` | 前 62 bin 全为 0 的像素数（要求严格 == 0）。 |
 | 串光检测 | `crosstalk_max / crosstalk_mean` | 所有像素的 `bin_corr[0]` 的 max / mean。 |
 | 底噪检测 | `noise_max / noise_mean` | 所有像素的 `bin_corr[30:50]` 在二维 × 20 个 bin 上的 max / mean。 |
-| 打光强度 | `light_max / light_mean` | 每像素取 `max(bin_corr[0:62])`，再统计 max / mean（要求达到下限）。 |
+| 打光强度 | `light_max / light_mean / light_min` | 每像素取 `max(bin_corr[0:62])`，再统计 max / mean / min（都要求达到下限）。 |
 
-`passed = 13 项 metric 全部落在 thresholds.json 规定的 [min, max] 内`。
+`passed = 14 项 metric 全部落在 thresholds.json 规定的 [min, max] 内`。

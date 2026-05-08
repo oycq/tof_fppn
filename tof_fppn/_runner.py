@@ -50,7 +50,7 @@ TOF_BIN_STEP_M = 0.15 * 4
 
 PLANE_DISTANCE_M = 1.4
 
-F_INIT = 43
+F_INIT = 34
 AX_INIT_DEG = 0.0
 AY_INIT_DEG = 0.0
 
@@ -86,7 +86,7 @@ _METRIC_NAMES: tuple[str, ...] = (
     "dead_pixels",
     "crosstalk_max", "crosstalk_mean",
     "noise_max", "noise_mean",
-    "light_max", "light_mean",
+    "light_max", "light_mean", "light_min",
 )
 
 
@@ -204,6 +204,7 @@ def _compute_extra_metrics(tof_cube: np.ndarray) -> dict[str, Any]:
     peak_per_pixel = np.max(comp, axis=2) if comp.size else np.zeros((IMG_H, IMG_W))
     light_max = float(np.max(peak_per_pixel)) if peak_per_pixel.size else 0.0
     light_mean = float(np.mean(peak_per_pixel)) if peak_per_pixel.size else 0.0
+    light_min = float(np.min(peak_per_pixel)) if peak_per_pixel.size else 0.0
 
     # 串光 top-2: 按 bin[0] 排序;底噪 top-2: 按"每像素 bin[NOISE_LO:NOISE_HI] 均值"排序。
     crosstalk_top2 = _topk_pixel_positions(bin0, k=2)
@@ -218,6 +219,7 @@ def _compute_extra_metrics(tof_cube: np.ndarray) -> dict[str, Any]:
             "noise_mean":     noise_mean,
             "light_max":      light_max,
             "light_mean":     light_mean,
+            "light_min":      light_min,
         },
         "bin0_per_pixel":  bin0,
         "peak_per_pixel":  peak_per_pixel,
@@ -770,13 +772,14 @@ _METRIC_DISPLAY: dict[str, tuple[str, str, str]] = {
     "noise_mean":     ("均值",          "",    "{:.1f}"),
     "light_max":      ("最大值",        "",    "{:.1f}"),
     "light_mean":     ("均值",          "",    "{:.1f}"),
+    "light_min":      ("最小值",        "",    "{:.1f}"),
 }
 
 _SECTIONS_LAYOUT: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("坏点检测",   ("dead_pixels",)),
     ("串光检测",   ("crosstalk_max", "crosstalk_mean")),
     ("底噪检测",   ("noise_max", "noise_mean")),
-    ("打光强度",   ("light_max", "light_mean")),
+    ("打光强度",   ("light_max", "light_mean", "light_min")),
     ("几何标定",   ("f", "ax", "ay")),
     ("FPPN 检测", ("bias",)),
     ("平面度",     ("rms", "worst")),
@@ -1111,14 +1114,14 @@ def run_all_checks(tof_raw_path: str) -> tuple[bool, np.ndarray, list[float]]:
             标定 / FPPN / 平面度"分组,每一项都列出 measured / threshold /
             状态。
         params : list[float]
-            13 个 metric 数值,顺序固定为：
+            14 个 metric 数值,顺序固定为：
             ``[f(px), ax(deg), ay(deg),
                bias(cm),
                rms(cm), worst(cm),
                dead_pixels,
                crosstalk_max, crosstalk_mean,
                noise_max, noise_mean,
-               light_max, light_mean]``。
+               light_max, light_mean, light_min]``。
             其中除几何/平面项之外的 max/mean 都是基于 *最后两个 bin
             饱和补偿后* 的 hist 值。
     """

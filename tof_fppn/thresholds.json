@@ -4,11 +4,12 @@
   "crosstalk_max":  { "max": 1000.0  },
   "crosstalk_mean": { "max": 300.0   },
 
-  "noise_max":      { "max": 100.0   },
+  "noise_max":      { "max": 50.0   },
   "noise_mean":     { "max": 5.0    },
 
   "light_max":      { "min": 3000.0   },
   "light_mean":     { "min": 2000.0   },
+  "light_min":      { "min": 1000.0   },
 
   "f":              { "min": 30,  "max": 40.0  },
   "ax":             { "min": -5.0,  "max": 5.0   },

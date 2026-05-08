@@ -399,8 +399,8 @@ def _draw_crosstalk_hist(ax: Any, bin0_per_pixel: np.ndarray) -> None:
         return
 
     ax.hist(vals, bins=30, color=_HIST_COLOR, edgecolor="white", alpha=0.9)
-    ax.set_title("串光分布 (bin[0])", pad=6)
-    ax.set_xlabel("bin[0] 补偿值", labelpad=4)
+    ax.set_title("串光分布", pad=6)
+    ax.set_xlabel("串光", labelpad=4)
     ax.set_ylabel("数量", labelpad=4)
     ax.grid(alpha=0.25, linestyle="--")
     ax.text(
@@ -420,7 +420,7 @@ def _draw_noise_hist(ax: Any, noise_per_pixel: np.ndarray) -> None:
         return
 
     ax.hist(vals, bins=30, color=_HIST_COLOR, edgecolor="white", alpha=0.9)
-    ax.set_title(f"底噪分布 (各像素 bin[{NOISE_BIN_LO}:{NOISE_BIN_HI}] 均值)", pad=6)
+    ax.set_title("底噪分布", pad=6)
     ax.set_xlabel("底噪", labelpad=4)
     ax.set_ylabel("数量", labelpad=4)
     ax.grid(alpha=0.25, linestyle="--")
@@ -468,7 +468,7 @@ def _draw_crosstalk_image(ax: Any, bin0_per_pixel: np.ndarray) -> None:
         interpolation="nearest",
         aspect="equal",
     )
-    ax.set_title("串光分布 (bin[0])", pad=6)
+    ax.set_title("串光分布", pad=6)
     ax.set_xlabel("列", labelpad=4)
     ax.set_ylabel("行", labelpad=4)
     cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -491,7 +491,7 @@ def _draw_noise_image(ax: Any, noise_per_pixel: np.ndarray) -> None:
         interpolation="nearest",
         aspect="equal",
     )
-    ax.set_title(f"底噪 (bin[{NOISE_BIN_LO}:{NOISE_BIN_HI}] 均值)", pad=6)
+    ax.set_title("底噪分布", pad=6)
     ax.set_xlabel("列", labelpad=4)
     ax.set_ylabel("行", labelpad=4)
     cbar = ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -988,7 +988,7 @@ def _compose_combined_image(
     header = np.zeros((_HEADER_HEIGHT, target_w, 3), dtype=np.uint8)
     _put_text(
         header,
-        "ToF 标定可视化(直方图 + 2D 图 + 3D 点云 + 串光/底噪最差像素 bin[0:62])",
+        "ToF 标定结果",
         (12, 34), (255, 255, 255), size=22, bold=True,
     )
     left = np.vstack([header, visual_left_bgr])

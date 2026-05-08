@@ -347,13 +347,20 @@ def _draw_3d_plot(ax: Any, points: np.ndarray, residuals: np.ndarray, normal: np
     )
     ax.plot_surface(px, py, pz, alpha=0.30, color="tab:green", linewidth=0, antialiased=True)
     ax.scatter([0.0], [0.0], [0.0], c="k", s=28, marker="x", linewidths=1.5)
-    ax.set_xlabel("X (m)", labelpad=4)
-    ax.set_ylabel("Y (m)", labelpad=4)
-    ax.set_zlabel("Z (m)", labelpad=4)
-    ax.set_title("ToF 点云 + 拟合平面", pad=6)
+    # 这一列只关心点云形态(是否成一片平面),数值/轴名都没意义;
+    # 但保留默认刻度位置——这样 3D 网格线还在,看得出立体感。
+    # 用 NullFormatter 隐藏 tick label 而不是 set_xticklabels([])——
+    # 后者会让 axes 仍按"有空 label"预留渲染位置,把整列布局挤乱。
+    from matplotlib.ticker import NullFormatter
+    ax.xaxis.set_major_formatter(NullFormatter())
+    ax.yaxis.set_major_formatter(NullFormatter())
+    ax.zaxis.set_major_formatter(NullFormatter())
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.set_zlabel("")
     # 点云在 z 方向几乎是一片薄板,把 z 方向压扁,让 X/Y 维度占满更多
     # 视觉空间,3D 散点不再挤成一团。
-    ax.set_box_aspect((1.4, 1.4, 0.9))
+    ax.set_box_aspect((1.3, 1.3, 0.85))
 
 
 def _draw_parallelism_hist(ax: Any, residuals_m: np.ndarray) -> None:
@@ -692,8 +699,8 @@ def _render_visual_left(
     | (2,1) 亮度  | (2,2) 串光  | (2,3) 底噪  | (2,4) 3D    |
     |     2D 图   |     2D 图   |     2D 图   |     点云    |
     +-------------+-------------+-------------+-------------+
-    | (3,1) 最暗  | (3,2) 串光  | (3,3) 底噪  | (3,4) 平行度|
-    |  亮度像素   |  最差像素#2 |  最大像素#1 |  最差像素   |
+    | (3,1) 最暗  | (3,2) 串光  | (3,3) 底噪  | (3,4) 平面度|
+    |  亮度像素   |  最差像素   |  最大像素   |  最差像素   |
     |   bin[0:62] |   bin[0:62] |   bin[0:62] |   bin[0:62] |
     +-------------+-------------+-------------+-------------+
     """
@@ -714,24 +721,11 @@ def _render_visual_left(
         # 收集每列 3 个 axes,渲染完后统一上主题色 + 顶端色带 banner。
         col_axes: list[list[Any]] = [[], [], [], []]
 
-        # row 1 — 直方图
-        ax = fig.add_subplot(gs[0, 0]); _draw_brightness_hist(ax, brightness_map);  col_axes[0].append(ax)
-        ax = fig.add_subplot(gs[0, 1]); _draw_crosstalk_hist(ax, bin0_per_pixel);   col_axes[1].append(ax)
-        ax = fig.add_subplot(gs[0, 2]); _draw_noise_hist(ax, noise_per_pixel);      col_axes[2].append(ax)
-        ax = fig.add_subplot(gs[0, 3]); _draw_parallelism_hist(ax, residuals_m);    col_axes[3].append(ax)
-
-        # row 2 — 2D / 3D 图
-        ax = fig.add_subplot(gs[1, 0]); _draw_brightness_image(ax, brightness_map); col_axes[0].append(ax)
-        ax = fig.add_subplot(gs[1, 1]); _draw_crosstalk_image(ax, bin0_per_pixel);  col_axes[1].append(ax)
-        ax = fig.add_subplot(gs[1, 2]); _draw_noise_image(ax, noise_per_pixel);     col_axes[2].append(ax)
-        ax_3d = fig.add_subplot(gs[1, 3], projection="3d")
-        _draw_3d_plot(ax_3d, points, residuals_m, normal)
-        col_axes[3].append(ax_3d)
-
-        # row 3 — 四个有代表性的单像素 bin[0:62] 直方图
+        # 先把 row 3 选用的"最差像素"位置算好,row 2 的 2D 图要在
+        # 对应像素位置画一个标记,与 row 3 一一对应。
         # (3,1)        最暗像素 (peak_per_pixel 最小,看打光是否偏弱)
-        # (3,2)        串光最差 #2  (bin0 第 2 大,高亮 bin[0])
-        # (3,3)        底噪最大 #1  (高亮 bin[NOISE_LO:NOISE_HI])
+        # (3,2)        串光最差    (bin0 第 2 大,高亮 bin[0])
+        # (3,3)        底噪最大    (高亮 bin[NOISE_LO:NOISE_HI])
         # (3,4)        平面度最差点 (|residual| 最大,看深度估计偏差最大的像素形态)
         # 最暗像素没有"关注 bin 段",高亮其峰值 bin,与串光/底噪的高亮风格保持一致;
         # 平面度最差点关心的是整体形态,不做高亮,只在右上角标残差。
@@ -752,7 +746,7 @@ def _render_visual_left(
             r, c = crosstalk_top2[1]
             row3_slots[1] = {
                 "pos":        (r, c),
-                "title":      "串光最差 #2",
+                "title":      "串光最差",
                 "highlight":  (0, 1),
                 "annotation": f"串光 = {float(bin0_per_pixel[r, c]):.1f}",
             }
@@ -761,7 +755,7 @@ def _render_visual_left(
             r, c = noise_top2[0]
             row3_slots[2] = {
                 "pos":        (r, c),
-                "title":      "底噪最大 #1",
+                "title":      "底噪最大",
                 "highlight":  (NOISE_BIN_LO, NOISE_BIN_HI),
                 "annotation": f"底噪 = {float(noise_per_pixel[r, c]):.2f}",
             }
@@ -777,6 +771,20 @@ def _render_visual_left(
                 "highlight":  None,
                 "annotation": f"残差 = {res_cm:+.2f} cm",
             }
+
+        # row 1 — 直方图
+        ax = fig.add_subplot(gs[0, 0]); _draw_brightness_hist(ax, brightness_map);  col_axes[0].append(ax)
+        ax = fig.add_subplot(gs[0, 1]); _draw_crosstalk_hist(ax, bin0_per_pixel);   col_axes[1].append(ax)
+        ax = fig.add_subplot(gs[0, 2]); _draw_noise_hist(ax, noise_per_pixel);      col_axes[2].append(ax)
+        ax = fig.add_subplot(gs[0, 3]); _draw_parallelism_hist(ax, residuals_m);    col_axes[3].append(ax)
+
+        # row 2 — 2D / 3D 图
+        ax = fig.add_subplot(gs[1, 0]); _draw_brightness_image(ax, brightness_map); col_axes[0].append(ax)
+        ax = fig.add_subplot(gs[1, 1]); _draw_crosstalk_image(ax, bin0_per_pixel);  col_axes[1].append(ax)
+        ax = fig.add_subplot(gs[1, 2]); _draw_noise_image(ax, noise_per_pixel);     col_axes[2].append(ax)
+        ax_3d = fig.add_subplot(gs[1, 3], projection="3d")
+        _draw_3d_plot(ax_3d, points, residuals_m, normal)
+        col_axes[3].append(ax_3d)
 
         for col, spec in enumerate(row3_slots):
             ax = fig.add_subplot(gs[2, col])

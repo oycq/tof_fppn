@@ -210,6 +210,13 @@ def _compute_extra_metrics(tof_cube: np.ndarray) -> dict[str, Any]:
     crosstalk_top2 = _topk_pixel_positions(bin0, k=2)
     noise_top2 = _topk_pixel_positions(noise_per_pixel, k=2)
 
+    # 最暗像素: peak_per_pixel 取 argmin,用于第三行 (3,1) 单像素 hist。
+    if peak_per_pixel.size:
+        flat_idx = int(np.argmin(peak_per_pixel))
+        dark_pos = (flat_idx // IMG_W, flat_idx % IMG_W)
+    else:
+        dark_pos = (0, 0)
+
     return {
         "values": {
             "dead_pixels":    dead_count,
@@ -229,6 +236,7 @@ def _compute_extra_metrics(tof_cube: np.ndarray) -> dict[str, Any]:
         "comp_cube":       comp,                  # (H, W, 62) 补偿后,供单像素 hist 用
         "crosstalk_top2":  crosstalk_top2,
         "noise_top2":      noise_top2,
+        "dark_pos":        dark_pos,               # 最暗像素 (row, col)
     }
 
 
@@ -603,6 +611,8 @@ def _render_visual_left(
     comp_cube: np.ndarray,
     crosstalk_top2: list[tuple[int, int]],
     noise_top2: list[tuple[int, int]],
+    dark_pos: tuple[int, int],
+    worst_pos: tuple[int, int],
     target_size: tuple[int, int],
 ) -> np.ndarray:
     """渲染 3x4 拼接图（BGR）。
@@ -620,8 +630,8 @@ def _render_visual_left(
     | (2,1) 亮度  | (2,2) 串光  | (2,3) 底噪  | (2,4) 3D    |
     |     2D 图   |     2D 图   |     2D 图   |     点云    |
     +-------------+-------------+-------------+-------------+
-    | (3,1) 串光  | (3,2) 串光  | (3,3) 底噪  | (3,4) 底噪  |
-    |  最差像素#1 |  最差像素#2 |  最大像素#1 |  最大像素#2 |
+    | (3,1) 最暗  | (3,2) 串光  | (3,3) 底噪  | (3,4) 平行度|
+    |  亮度像素   |  最差像素#2 |  最大像素#1 |  最差像素   |
     |   bin[0:62] |   bin[0:62] |   bin[0:62] |   bin[0:62] |
     +-------------+-------------+-------------+-------------+
     """
@@ -652,32 +662,55 @@ def _render_visual_left(
         ax_3d = fig.add_subplot(gs[1, 3], projection="3d")
         _draw_3d_plot(ax_3d, points, residuals_m, normal)
 
-        # row 3 — 串光 / 底噪 最差像素的 bin[0:62] 直方图
-        # (3,1)/(3,2): 串光 top-2 (高亮 bin[0],右上角标这个像素的串光值)
-        # (3,3)/(3,4): 底噪 top-2 (高亮 bin[NOISE_LO:NOISE_HI],右上角标底噪值)
-        row3_slots: list[dict[str, Any] | None] = []
-        for i in range(2):
-            if i < len(crosstalk_top2):
-                r, c = crosstalk_top2[i]
-                row3_slots.append({
-                    "pos":        (r, c),
-                    "title":      f"串光最差 #{i + 1}",
-                    "highlight":  (0, 1),
-                    "annotation": f"串光 = {float(bin0_per_pixel[r, c]):.1f}",
-                })
-            else:
-                row3_slots.append(None)
-        for i in range(2):
-            if i < len(noise_top2):
-                r, c = noise_top2[i]
-                row3_slots.append({
-                    "pos":        (r, c),
-                    "title":      f"底噪最大 #{i + 1}",
-                    "highlight":  (NOISE_BIN_LO, NOISE_BIN_HI),
-                    "annotation": f"底噪 = {float(noise_per_pixel[r, c]):.2f}",
-                })
-            else:
-                row3_slots.append(None)
+        # row 3 — 四个有代表性的单像素 bin[0:62] 直方图
+        # (3,1)        最暗像素 (peak_per_pixel 最小,看打光是否偏弱)
+        # (3,2)        串光最差 #2  (bin0 第 2 大,高亮 bin[0])
+        # (3,3)        底噪最大 #1  (高亮 bin[NOISE_LO:NOISE_HI])
+        # (3,4)        平面度最差点 (|residual| 最大,看深度估计偏差最大的像素形态)
+        # 最暗像素没有"关注 bin 段",高亮其峰值 bin,与串光/底噪的高亮风格保持一致;
+        # 平面度最差点关心的是整体形态,不做高亮,只在右上角标残差。
+        row3_slots: list[dict[str, Any] | None] = [None, None, None, None]
+
+        dr, dc = int(dark_pos[0]), int(dark_pos[1])
+        if 0 <= dr < comp_cube.shape[0] and 0 <= dc < comp_cube.shape[1]:
+            dark_bins = comp_cube[dr, dc, :]
+            dark_peak_bin = int(np.argmax(dark_bins)) if dark_bins.size else 0
+            row3_slots[0] = {
+                "pos":        (dr, dc),
+                "title":      "最暗像素",
+                "highlight":  (dark_peak_bin, dark_peak_bin + 1),
+                "annotation": f"亮度 = {float(brightness_map[dr, dc]):.1f}",
+            }
+
+        if len(crosstalk_top2) >= 2:
+            r, c = crosstalk_top2[1]
+            row3_slots[1] = {
+                "pos":        (r, c),
+                "title":      "串光最差 #2",
+                "highlight":  (0, 1),
+                "annotation": f"串光 = {float(bin0_per_pixel[r, c]):.1f}",
+            }
+
+        if len(noise_top2) >= 1:
+            r, c = noise_top2[0]
+            row3_slots[2] = {
+                "pos":        (r, c),
+                "title":      "底噪最大 #1",
+                "highlight":  (NOISE_BIN_LO, NOISE_BIN_HI),
+                "annotation": f"底噪 = {float(noise_per_pixel[r, c]):.2f}",
+            }
+
+        wr, wc = int(worst_pos[0]), int(worst_pos[1])
+        if 0 <= wr < comp_cube.shape[0] and 0 <= wc < comp_cube.shape[1]:
+            # residuals_m 与 (H, W) 行优先一一对应。
+            res_map = np.asarray(residuals_m, dtype=np.float64).reshape(IMG_H, IMG_W)
+            res_cm = float(res_map[wr, wc]) * 100.0
+            row3_slots[3] = {
+                "pos":        (wr, wc),
+                "title":      "平面度最差",
+                "highlight":  None,
+                "annotation": f"残差 = {res_cm:+.2f} cm",
+            }
 
         for col, spec in enumerate(row3_slots):
             ax = fig.add_subplot(gs[2, col])
@@ -1061,6 +1094,13 @@ def _calibrate(tof_cube: np.ndarray) -> dict[str, Any]:
         np.partition(abs_err, abs_err.size - worst_k)[abs_err.size - worst_k]
     )
 
+    # 平面度最差像素: |residual| 最大的位置,行优先索引还原成 (row, col)。
+    if abs_err.size:
+        worst_flat_idx = int(np.argmax(abs_err))
+        worst_pos = (worst_flat_idx // IMG_W, worst_flat_idx % IMG_W)
+    else:
+        worst_pos = (0, 0)
+
     # 误差 / 偏置统一以 cm 对外暴露；其余产测项见 _compute_extra_metrics。
     values: dict[str, float] = {
         "f":     f,
@@ -1085,6 +1125,8 @@ def _calibrate(tof_cube: np.ndarray) -> dict[str, Any]:
         "comp_cube":       extra["comp_cube"],
         "crosstalk_top2":  extra["crosstalk_top2"],
         "noise_top2":      extra["noise_top2"],
+        "dark_pos":        extra["dark_pos"],
+        "worst_pos":       worst_pos,
     }
 
 
@@ -1108,8 +1150,8 @@ def run_all_checks(tof_raw_path: str) -> tuple[bool, np.ndarray, list[float]]:
             BGR 图像，左侧为 3x4 标定可视化：
             行 1 = 亮度 / 串光 / 底噪 / 平行度 四张直方图，
             行 2 = 亮度 2D / 串光 2D / 底噪 2D / 3D 点云 + 拟合平面，
-            行 3 = 串光最差 #1 / #2、底噪最大 #1 / #2 各像素的 bin[0:62]
-                  补偿后柱状图(关注区段橙红高亮);
+            行 3 = 最暗像素 / 串光最差 #2 / 底噪最大 #1 / 平面度最差点
+                  各像素的 bin[0:62] 补偿后柱状图(关注区段橙红高亮);
             右侧为产测项目面板，按"坏点 / 串光 / 底噪 / 打光 / 几何
             标定 / FPPN / 平面度"分组,每一项都列出 measured / threshold /
             状态。
@@ -1152,6 +1194,7 @@ def run_all_checks(tof_raw_path: str) -> tuple[bool, np.ndarray, list[float]]:
         cali["residuals"], cali["points"], cali["normal"],
         cali["brightness_map"], cali["bin0_per_pixel"], cali["noise_per_pixel"],
         cali["comp_cube"], cali["crosstalk_top2"], cali["noise_top2"],
+        cali["dark_pos"], cali["worst_pos"],
         target_size=(_LEFT_WIDTH, target_body_h),
     )
     image = _compose_combined_image(visual_left_bgr, panel)

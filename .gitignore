@@ -1,3 +1,5 @@
 data.npy
 tof.raw
 __pycache__/
+tmp/
+snapshots/

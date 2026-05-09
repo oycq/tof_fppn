@@ -17,7 +17,7 @@ flowchart LR
 
 ```bash
 pip install opencv-python numpy pillow scipy matplotlib
-python run.py tof_60cm.raw
+python run.py tof.raw
 ```
 
 会弹出一张 1800px 宽的拼接图：
@@ -33,7 +33,7 @@ python run.py tof_60cm.raw
 ```python
 from tof_fppn import run_all_checks
 
-passed, image, params = run_all_checks("tof_60cm.raw")
+passed, image, params = run_all_checks("tof.raw")
 # passed : bool
 # image  : np.ndarray (H, W, 3) BGR，可直接 cv2.imshow / cv2.imwrite
 # params : list[float] 长度 14，顺序固定为：

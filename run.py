@@ -2,8 +2,7 @@
 
 用法::
 
-    python run.py tof_60cm.raw
-    python run.py tof_15cm.raw
+    python run.py tof.raw
 """
 
 import sys

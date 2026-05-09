@@ -17,7 +17,7 @@ ToF FPPN（Fixed-Pattern Plane Noise）/ 几何标定 / 光度产测包。
 
     from tof_fppn import run_all_checks
 
-    passed, image, params = run_all_checks("tof_60cm.raw")
+    passed, image, params = run_all_checks("tof.raw")
     # passed : bool
     # image  : numpy.ndarray (H, W, 3) BGR，可直接 cv2.imshow / cv2.imwrite
     # params : list[float] 长度 14

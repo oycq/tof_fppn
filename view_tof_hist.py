@@ -4,7 +4,7 @@
 import cv2
 import numpy as np
 
-RAW_FILE = "tof_60cm.raw"
+RAW_FILE = "tof.raw"
 IMG_H = 30
 IMG_W = 40
 BIN_COUNT = 64

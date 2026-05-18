@@ -27,7 +27,7 @@ ToF FPPN（Fixed-Pattern Plane Noise）/ 几何标定 / 光度产测包。
     #           dead_pixels,
     #           crosstalk_max, crosstalk_mean,
     #           noise_max, noise_mean,
-    #           light_max, light_mean, light_min]
+    #           light_top10, light_mean, light_bright_ratio]
 
 返回结构详见 :func:`run_all_checks`。
 """

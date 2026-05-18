@@ -90,7 +90,7 @@ _METRIC_NAMES: tuple[str, ...] = (
     "dead_pixels",
     "crosstalk_max", "crosstalk_mean",
     "noise_max", "noise_mean",
-    "light_max", "light_mean", "light_min",
+    "light_top10", "light_mean", "light_bright_ratio",
 )
 
 
@@ -222,9 +222,19 @@ def _compute_extra_metrics(tof_cube: np.ndarray) -> dict[str, Any]:
     noise_mean = float(np.mean(noise_per_pixel)) if noise_per_pixel.size else 0.0
 
     peak_per_pixel = np.max(comp, axis=2) if comp.size else np.zeros((IMG_H, IMG_W))
-    light_max = float(np.max(peak_per_pixel)) if peak_per_pixel.size else 0.0
-    light_mean = float(np.mean(peak_per_pixel)) if peak_per_pixel.size else 0.0
-    light_min = float(np.min(peak_per_pixel)) if peak_per_pixel.size else 0.0
+    # 三项打光强度卡控：
+    #   light_top10:         前 10% 亮像素的均值 (反映"最亮区"被打得够不够亮)
+    #   light_mean:          整图均值
+    #   light_bright_ratio:  亮度 > BRIGHT_MIN 的像素占比,%  (覆盖面够不够)
+    if peak_per_pixel.size:
+        flat = peak_per_pixel.reshape(-1)
+        k = max(1, int(round(flat.size * 0.1)))
+        top10_vals = np.partition(flat, flat.size - k)[flat.size - k:]
+        light_top10 = float(np.mean(top10_vals))
+        light_mean = float(np.mean(flat))
+        light_bright_ratio = float(np.mean(flat > BRIGHT_MIN)) * 100.0
+    else:
+        light_top10 = light_mean = light_bright_ratio = 0.0
 
     # 串光 top-2: 按 bin[0] 排序;底噪 top-2: 按"每像素 bin[NOISE_LO:NOISE_HI] 均值"排序。
     crosstalk_top2 = _topk_pixel_positions(bin0, k=2)
@@ -244,9 +254,9 @@ def _compute_extra_metrics(tof_cube: np.ndarray) -> dict[str, Any]:
             "crosstalk_mean": crosstalk_mean,
             "noise_max":      noise_max,
             "noise_mean":     noise_mean,
-            "light_max":      light_max,
-            "light_mean":     light_mean,
-            "light_min":      light_min,
+            "light_top10":         light_top10,
+            "light_mean":          light_mean,
+            "light_bright_ratio":  light_bright_ratio,
         },
         "bin0_per_pixel":  bin0,
         "peak_per_pixel":  peak_per_pixel,
@@ -899,16 +909,16 @@ _METRIC_DISPLAY: dict[str, tuple[str, str, str]] = {
     "crosstalk_mean": ("均值",          "",    "{:.1f}"),
     "noise_max":      ("最大值",        "",    "{:.1f}"),
     "noise_mean":     ("均值",          "",    "{:.1f}"),
-    "light_max":      ("最大值",        "",    "{:.1f}"),
-    "light_mean":     ("均值",          "",    "{:.1f}"),
-    "light_min":      ("最小值",        "",    "{:.1f}"),
+    "light_top10":        ("前10%均值",     "",    "{:.1f}"),
+    "light_mean":         ("均值",          "",    "{:.1f}"),
+    "light_bright_ratio": (f">{int(BRIGHT_MIN)}占比",     "%", "{:.1f}"),
 }
 
 _SECTIONS_LAYOUT: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("坏点检测",   ("dead_pixels",)),
     ("串光检测",   ("crosstalk_max", "crosstalk_mean")),
     ("底噪检测",   ("noise_max", "noise_mean")),
-    ("打光强度",   ("light_max", "light_mean", "light_min")),
+    ("打光强度",   ("light_top10", "light_mean", "light_bright_ratio")),
     ("几何标定",   ("f", "ax", "ay")),
     ("FPPN 检测", ("bias",)),
     ("平面度",     ("rms", "worst")),
@@ -1276,7 +1286,7 @@ def run_all_checks(tof_raw_path: str) -> tuple[bool, np.ndarray, list[float]]:
                dead_pixels,
                crosstalk_max, crosstalk_mean,
                noise_max, noise_mean,
-               light_max, light_mean, light_min]``。
+               light_top10, light_mean, light_bright_ratio]``。
             其中除几何/平面项之外的 max/mean 都是基于 *最后两个 bin
             饱和补偿后* 的 hist 值。
     """

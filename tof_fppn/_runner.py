@@ -67,6 +67,10 @@ POWELL_FTOL = 1e-8
 
 WORST_ERROR_TOP_RATIO = 0.01
 
+# 平面拟合 / bias / rms / worst 都只统计亮度 > BRIGHT_MIN 的像素,
+# 避开黑边 / 死像素 / 远点干扰。亮度口径同 light_* 指标 (peak_per_pixel)。
+BRIGHT_MIN = 1000.0
+
 SAT_SCALE = 50000.0
 SAT_HIGH_BIN_WEIGHT = 1024.0
 
@@ -126,10 +130,26 @@ def _depth_from_hist_centroid(tof_cube: np.ndarray) -> np.ndarray:
     return np.asarray(centroid * TOF_BIN_STEP_M, dtype=np.float64)
 
 
-def _compute_bias_from_depth(depth_map_m: np.ndarray, plane_distance_m: float) -> float:
-    filtered = uniform_filter(np.asarray(depth_map_m, dtype=np.float64), size=5, mode="nearest")
-    nearest_m = float(np.min(filtered))
-    return nearest_m - float(plane_distance_m)
+def _compute_bias_from_depth(
+    depth_map_m: np.ndarray,
+    bright_mask: np.ndarray,
+    plane_distance_m: float,
+) -> float:
+    """5x5 邻域内"亮像素均值"取最近点作为 bias 参考。
+
+    直接对 depth 做 ``uniform_filter`` 会把暗/坏像素一起平均进去,中心
+    像素再亮也会被带偏。这里改用 masked smoothing:分子是
+    ``sum(depth * mask)``,分母是 ``sum(mask)``,两个都用 uniform_filter
+    取和(uniform_filter 返回的是均值,但比值会把 1/N 约掉),得到
+    "邻域内亮像素的均值"。暗像素不进入累加,中心值不会被污染。
+    """
+    depth = np.asarray(depth_map_m, dtype=np.float64)
+    mask_f = bright_mask.astype(np.float64)
+    sum5 = uniform_filter(depth * mask_f, size=5, mode="constant", cval=0.0)
+    cnt5 = uniform_filter(mask_f,         size=5, mode="constant", cval=0.0)
+    filtered = np.where(cnt5 > 0.0, sum5 / np.maximum(cnt5, 1e-12), depth)
+    pool = filtered[bright_mask] if bright_mask.any() else filtered
+    return float(np.min(pool)) - float(plane_distance_m)
 
 
 def _compute_peak_brightness(tof_cube: np.ndarray) -> np.ndarray:
@@ -682,6 +702,7 @@ def _render_visual_left(
     noise_top2: list[tuple[int, int]],
     dark_pos: tuple[int, int],
     worst_pos: tuple[int, int],
+    worst_residual_cm: float,
     target_size: tuple[int, int],
 ) -> np.ndarray:
     """渲染 3x4 拼接图（BGR）。
@@ -762,14 +783,11 @@ def _render_visual_left(
 
         wr, wc = int(worst_pos[0]), int(worst_pos[1])
         if 0 <= wr < comp_cube.shape[0] and 0 <= wc < comp_cube.shape[1]:
-            # residuals_m 与 (H, W) 行优先一一对应。
-            res_map = np.asarray(residuals_m, dtype=np.float64).reshape(IMG_H, IMG_W)
-            res_cm = float(res_map[wr, wc]) * 100.0
             row3_slots[3] = {
                 "pos":        (wr, wc),
                 "title":      "平面度最差",
                 "highlight":  None,
-                "annotation": f"残差 = {res_cm:+.2f} cm",
+                "annotation": f"残差 = {worst_residual_cm:+.2f} cm",
             }
 
         # row 1 — 直方图
@@ -1129,9 +1147,21 @@ def _compose_combined_image(
 def _calibrate(tof_cube: np.ndarray) -> dict[str, Any]:
     depth_map = _depth_from_hist_centroid(tof_cube)
     extra = _compute_extra_metrics(tof_cube)
-    bias_fixed = _compute_bias_from_depth(depth_map, PLANE_DISTANCE_M)
-    depth_flat = depth_map.reshape(-1)
-    u_flat, v_flat = _build_roi_uv()
+
+    # 一次性把"参与几何拟合的像素"裁出来：bias / Powell / rms / worst / 3D 点云
+    # 都吃这个扁平子集,自然只看亮像素,不需要在下游各处再加 mask。
+    # bright_indices 用来把"子集内的局部下标"映射回原图 (row, col),
+    # 给可视化第三行 (3,4) 找最差像素位置用。
+    bright_mask = extra["peak_per_pixel"] > BRIGHT_MIN
+    bright_flat = bright_mask.reshape(-1)
+    bright_indices = np.flatnonzero(bright_flat)
+
+    bias_fixed = _compute_bias_from_depth(depth_map, bright_mask, PLANE_DISTANCE_M)
+
+    u_full, v_full = _build_roi_uv()
+    depth_flat = depth_map.reshape(-1)[bright_flat]
+    u_flat = u_full[bright_flat]
+    v_flat = v_full[bright_flat]
 
     cx0 = (IMG_W - 1) / 2.0
     cy0 = (IMG_H - 1) / 2.0
@@ -1172,12 +1202,16 @@ def _calibrate(tof_cube: np.ndarray) -> dict[str, Any]:
         np.partition(abs_err, abs_err.size - worst_k)[abs_err.size - worst_k]
     )
 
-    # 平面度最差像素: |residual| 最大的位置,行优先索引还原成 (row, col)。
+    # 平面度最差像素: |residual| 最大的位置;由于 r_opt 已经是"亮像素子集",
+    # 需要先在子集内 argmax,再用 bright_indices 还原成原图行优先索引。
     if abs_err.size:
-        worst_flat_idx = int(np.argmax(abs_err))
+        worst_local = int(np.argmax(abs_err))
+        worst_flat_idx = int(bright_indices[worst_local])
         worst_pos = (worst_flat_idx // IMG_W, worst_flat_idx % IMG_W)
+        worst_residual_cm = float(r_opt[worst_local]) * 100.0
     else:
         worst_pos = (0, 0)
+        worst_residual_cm = 0.0
 
     # 误差 / 偏置统一以 cm 对外暴露；其余产测项见 _compute_extra_metrics。
     values: dict[str, float] = {
@@ -1201,10 +1235,11 @@ def _calibrate(tof_cube: np.ndarray) -> dict[str, Any]:
         "noise_per_pixel": extra["noise_per_pixel"],
         "dead_mask":       extra["dead_mask"],
         "comp_cube":       extra["comp_cube"],
-        "crosstalk_top2":  extra["crosstalk_top2"],
-        "noise_top2":      extra["noise_top2"],
-        "dark_pos":        extra["dark_pos"],
-        "worst_pos":       worst_pos,
+        "crosstalk_top2":    extra["crosstalk_top2"],
+        "noise_top2":        extra["noise_top2"],
+        "dark_pos":          extra["dark_pos"],
+        "worst_pos":         worst_pos,
+        "worst_residual_cm": worst_residual_cm,
     }
 
 
@@ -1272,7 +1307,7 @@ def run_all_checks(tof_raw_path: str) -> tuple[bool, np.ndarray, list[float]]:
         cali["residuals"], cali["points"], cali["normal"],
         cali["brightness_map"], cali["bin0_per_pixel"], cali["noise_per_pixel"],
         cali["comp_cube"], cali["crosstalk_top2"], cali["noise_top2"],
-        cali["dark_pos"], cali["worst_pos"],
+        cali["dark_pos"], cali["worst_pos"], cali["worst_residual_cm"],
         target_size=(_LEFT_WIDTH, target_body_h),
     )
     image = _compose_combined_image(visual_left_bgr, panel)
